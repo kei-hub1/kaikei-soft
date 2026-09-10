@@ -2,10 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import socket
 import threading
 import webbrowser
 
 import uvicorn
+
+
+def is_running(host: str, port: int) -> bool:
+    """すでに同じポートでサーバーが動いているかを調べる。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex((host, port)) == 0
 
 
 def main() -> None:
@@ -17,10 +25,21 @@ def main() -> None:
     args = p.parse_args()
 
     url = f"http://{args.host}:{args.port}/"
+
+    # 二重起動の場合はエラーにせず、動いている方をブラウザで開く。
+    if is_running(args.host, args.port):
+        print(f"財務エントリ はすでに起動しています: {url}")
+        if not args.no_browser:
+            webbrowser.open(url)
+        return
+
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     print(f"財務エントリ を起動しました: {url}  (終了は Ctrl+C)")
-    uvicorn.run("app.main:app", host=args.host, port=args.port, reload=args.reload, log_level="warning")
+    try:
+        uvicorn.run("app.main:app", host=args.host, port=args.port, reload=args.reload, log_level="warning")
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

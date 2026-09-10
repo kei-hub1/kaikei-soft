@@ -67,7 +67,7 @@ echo.
 echo   財務エントリ を起動します。ブラウザが自動的に開きます。
 echo   終了するときは、このウィンドウで Ctrl+C を押すか、ウィンドウを閉じてください。
 echo.
-%PY% run.py
+%PY% run.py %*
 echo.
 echo   財務エントリ を終了しました。
 pause
