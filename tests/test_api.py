@@ -233,3 +233,184 @@ def test_masters_and_opening_balances(client):
     r = client.post(f"/api/clients/{cid}/entries", json={"entry_date": fy["start_date"], "lines": [
         {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["100"]["id"], "amount": 100}]})
     assert r.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# 勘定科目マスタの自由な編集
+# ---------------------------------------------------------------------------
+
+def test_account_code_and_name_are_freely_editable(client):
+    """コードと名称を変えても、過去の仕訳・期首残高は科目 ID で結び付いたまま残る。"""
+    cl, fy, acc = make_client(client)
+    cid = cl["id"]
+    cash_id = acc["100"]["id"]
+    sales_id = acc["500"]["id"]
+    client.put(f"/api/fiscal-years/{fy['id']}/opening-balances", json={"items": [
+        {"account_id": cash_id, "amount": 50000},
+        {"account_id": acc["400"]["id"], "amount": -50000},
+    ]}).raise_for_status()
+    client.post(f"/api/clients/{cid}/entries", json={"entry_date": fy["start_date"], "lines": [
+        {"debit_account_id": cash_id, "credit_account_id": sales_id, "amount": 11000, "tax_class": "11"}]}).raise_for_status()
+
+    # TKC 風のコードへ付け替え、名称も変更する
+    r = client.put(f"/api/accounts/{cash_id}", json={
+        "code": "1101", "name": "現金及び預金", "kana": "げんきんおよびよきん",
+        "grp": "流動資産", "default_tax_class": "00", "role": "", "active": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["code"] == "1101" and r.json()["name"] == "現金及び預金"
+
+    tb = client.get(f"/api/fiscal-years/{fy['id']}/reports/trial-balance").json()
+    rows = {x["code"]: x for x in tb["rows"]}
+    assert "100" not in rows
+    assert rows["1101"]["name"] == "現金及び預金"
+    assert rows["1101"]["opening_n"] == 50000
+    assert rows["1101"]["closing_n"] == 61000
+    entry = client.get(f"/api/clients/{cid}/entries").json()["entries"][0]
+    assert entry["lines"][0]["debit_code"] == "1101"
+
+
+def test_accounts_bulk_save(client):
+    cl, fy, acc = make_client(client)
+    cid = cl["id"]
+    items = [{"id": a["id"], "code": a["code"], "name": a["name"], "kana": a["kana"], "grp": a["grp"],
+              "default_tax_class": a["default_tax_class"], "role": a["role"],
+              "sort_order": a["sort_order"], "active": bool(a["active"])}
+             for a in client.get(f"/api/clients/{cid}/accounts").json()]
+    # 既存 1 件のコードを変更、1 件追加、1 件削除
+    items[0]["code"] = "1000"
+    items[0]["name"] = "現金 (小口)"
+    items.append({"id": None, "code": "9001", "name": "教育訓練費", "kana": "きょういくくんれんひ",
+                  "grp": "販売費及び一般管理費", "default_tax_class": "21", "role": "", "sort_order": 9999, "active": True})
+    drop = acc["101"]["id"]
+    r = client.put(f"/api/clients/{cid}/accounts/bulk",
+                   json={"items": [i for i in items if i["id"] != drop], "delete_ids": [drop]})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"created": 1, "updated": len(items) - 2, "deleted": 1}
+    after = {a["code"]: a for a in client.get(f"/api/clients/{cid}/accounts").json()}
+    assert "1000" in after and after["1000"]["name"] == "現金 (小口)"
+    assert "9001" in after and after["9001"]["category"] == "expense"
+    assert "101" not in after
+
+    # コード重複は拒否される
+    dupe = [dict(i) for i in items if i["id"] != drop]
+    dupe[1]["code"] = dupe[0]["code"]
+    r = client.put(f"/api/clients/{cid}/accounts/bulk", json={"items": dupe, "delete_ids": []})
+    assert r.status_code == 409 and "重複" in r.json()["detail"]
+
+    # 使用中の科目は削除できない
+    client.post(f"/api/clients/{cid}/entries", json={"entry_date": fy["start_date"], "lines": [
+        {"debit_account_id": acc["617"]["id"], "credit_account_id": after["1000"]["id"], "amount": 500}]}).raise_for_status()
+    keep = [i for i in items if i["id"] not in (drop, acc["617"]["id"])]
+    r = client.put(f"/api/clients/{cid}/accounts/bulk", json={"items": keep, "delete_ids": [acc["617"]["id"]]})
+    assert r.status_code == 409 and "使用されている" in r.json()["detail"]
+
+
+def test_accounts_csv_roundtrip_and_replace(client):
+    cl, fy, acc = make_client(client, tax_method="exclusive")
+    cid = cl["id"]
+    r = client.get(f"/api/clients/{cid}/export/accounts.csv")
+    assert r.status_code == 200
+    text = r.content.decode("utf-8-sig")
+    assert text.splitlines()[0].startswith("コード,科目名,かな,表示区分,既定の税区分,役割,並び順,有効")
+    assert "仮受消費税" in text
+
+    # 自前 (TKC 風) の科目表に丸ごと入れ替える
+    csv_text = ("﻿" + "\r\n".join([
+        "コード,科目名,かな,表示区分,既定の税区分,役割,並び順,有効",
+        "1101,現金,げんきん,流動資産,00,,10,1",
+        "1102,普通預金,ふつうよきん,流動資産,00,,20,1",
+        "1301,仮払消費税等,かりばらいしょうひぜい,流動資産,00,仮払消費税,30,1",
+        "2101,買掛金,かいかけきん,流動負債,00,,40,1",
+        "2301,仮受消費税等,かりうけしょうひぜい,流動負債,00,仮受消費税,50,1",
+        "3201,繰越利益剰余金,くりこしりえきじょうよきん,純資産,00,繰越利益剰余金,60,1",
+        "4101,売上高,うりあげだか,売上高,課税売上 10%,,70,1",
+        "5101,仕入高,しいれだか,売上原価,21,,80,1",
+        "# この行は読み飛ばされます",
+        "",
+    ])).encode("utf-8")
+
+    files = {"file": ("accounts.csv", io.BytesIO(csv_text), "text/csv")}
+    dry = client.post(f"/api/clients/{cid}/import/accounts", params={"mode": "replace", "dry_run": True}, files=files)
+    assert dry.status_code == 200, dry.text
+    d = dry.json()
+    assert d["created"] == 8 and d["updated"] == 0 and d["warnings"] == []
+    assert d["deleted"] + d["deactivated"] == len(acc)
+    assert {a["code"] for a in client.get(f"/api/clients/{cid}/accounts").json()} == set(acc)  # 確認だけなので未変更
+
+    files = {"file": ("accounts.csv", io.BytesIO(csv_text), "text/csv")}
+    imp = client.post(f"/api/clients/{cid}/import/accounts", params={"mode": "replace"}, files=files)
+    assert imp.status_code == 200, imp.text
+    after = {a["code"]: a for a in client.get(f"/api/clients/{cid}/accounts").json()}
+    assert set(after) == {"1101", "1102", "1301", "2101", "2301", "3201", "4101", "5101"}
+    assert after["4101"]["default_tax_class"] == "11"       # 名称からコードを解決
+    assert after["1301"]["role"] == "tax_receivable"        # 日本語の役割名を解決
+    assert after["3201"]["category"] == "equity"
+
+    # 入れ替えた科目表で税抜経理の仕訳・繰越が動く
+    client.post(f"/api/clients/{cid}/entries", json={"entry_date": fy["start_date"], "lines": [
+        {"debit_account_id": after["1101"]["id"], "credit_account_id": after["4101"]["id"],
+         "amount": 110000, "tax_class": "11"}]}).raise_for_status()
+    tb = client.get(f"/api/fiscal-years/{fy['id']}/reports/trial-balance").json()
+    rows = {x["code"]: x for x in tb["rows"]}
+    assert rows["4101"]["closing_n"] == 100000
+    assert rows["2301"]["closing_n"] == 10000
+    cf = client.post(f"/api/fiscal-years/{fy['id']}/carry-forward")
+    assert cf.status_code == 200, cf.text
+    ob = {o["account_code"]: o["amount"] for o in
+          client.get(f"/api/fiscal-years/{cf.json()['next_fiscal_year']['id']}/opening-balances").json()}
+    assert ob["1101"] == 110000 and ob["3201"] == -100000
+    assert sum(ob.values()) == 0
+
+
+def test_accounts_csv_import_validation_and_warnings(client):
+    cl, fy, acc = make_client(client, tax_method="exclusive")
+    cid = cl["id"]
+
+    def send(body, **params):
+        files = {"file": ("a.csv", io.BytesIO(body.encode("utf-8")), "text/csv")}
+        return client.post(f"/api/clients/{cid}/import/accounts", params=params, files=files)
+
+    head = "コード,科目名,表示区分,既定の税区分,役割\r\n"
+    assert send(head + "100,現金,ありえない区分,00,\r\n").status_code == 400
+    assert send(head + "100,現金,流動資産,99,\r\n").status_code == 400
+    assert send(head + "100,現金,流動資産,00,ありえない役割\r\n").status_code == 400
+    assert send(head + "100,現金,流動資産,00,\r\n100,重複,流動資産,00,\r\n").status_code == 400
+    assert send(head + ",名前なし,流動資産,00,\r\n").status_code == 400
+    r = send(head + "100,現金,流動資産,00,仮払消費税\r\n101,小口,流動資産,00,仮払消費税\r\n")
+    assert r.status_code == 400 and "重複" in r.json()["detail"]
+
+    # replace で必要な役割が欠けると警告が返る (取込自体は行われる)
+    r = send(head + "100,現金,流動資産,00,\r\n", mode="replace", dry_run=True)
+    assert r.status_code == 200
+    w = " ".join(r.json()["warnings"])
+    assert "仮払消費税" in w and "仮受消費税" in w and "繰越利益剰余金" in w
+
+
+def test_copy_accounts_between_clients_and_empty_chart(client):
+    src, fy_src, acc_src = make_client(client, code="001")
+    # 科目表を空にして顧問先を作る
+    r = client.post("/api/clients", json={"code": "002", "name": "新規法人", "entity_type": "corp",
+                                          "tax_method": "inclusive", "fiscal_start_month": 4,
+                                          "copy_standard_accounts": False})
+    assert r.status_code == 201
+    dst = r.json()
+    assert client.get(f"/api/clients/{dst['id']}/accounts").json() == []
+    assert len(client.get(f"/api/clients/{dst['id']}/fiscal-years").json()) == 1
+
+    # 複写元に補助科目を作ってから複写する
+    client.post(f"/api/accounts/{acc_src['111']['id']}/sub-accounts", json={"code": "1", "name": "○○銀行"}).raise_for_status()
+    client.put(f"/api/accounts/{acc_src['100']['id']}", json={
+        "code": "1101", "name": "現金", "kana": "げんきん", "grp": "流動資産",
+        "default_tax_class": "00", "role": "", "active": True}).raise_for_status()
+
+    r = client.post(f"/api/clients/{dst['id']}/accounts/copy-from/{src['id']}", params={"with_subs": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] == len(acc_src) and r.json()["sub_accounts"] == 1
+    after = {a["code"]: a for a in client.get(f"/api/clients/{dst['id']}/accounts").json()}
+    assert "1101" in after and "100" not in after
+    assert after["412"]["role"] == "retained"
+    subs = client.get(f"/api/clients/{dst['id']}/sub-accounts").json()
+    assert len(subs) == 1 and subs[0]["name"] == "○○銀行"
+
+    # 自分自身を複写元にはできない
+    assert client.post(f"/api/clients/{dst['id']}/accounts/copy-from/{dst['id']}").status_code == 400

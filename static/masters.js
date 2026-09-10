@@ -21,107 +21,352 @@ const field = (label, inner, wide = false) => `<label class="field${wide ? ' wid
 const textInput = (name, value = '', attrs = '') => `<input type="text" name="${name}" value="${esc(value)}" ${attrs}>`;
 const selectInput = (name, options, value) => `<select name="${name}">${options.map(o => `<option value="${esc(o.value)}" ${String(o.value) === String(value) ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
 const checkInput = (name, checked) => `<input type="checkbox" name="${name}" ${checked ? 'checked' : ''}>`;
-
 // ---------------------------------------------------------------- 勘定科目
 routes.accounts = async function (main) {
+  // 編集中の行データ。id が null の行は新規追加。
+  let rows = [];
+  let deleted = [];
+  let dirty = false;
+
+  function snapshot() {
+    return S.accounts.map(a => ({
+      id: a.id, code: a.code, name: a.name, kana: a.kana, grp: a.grp,
+      default_tax_class: a.default_tax_class, role: a.role, sort_order: a.sort_order,
+      active: !!a.active, sub_count: (S.subsByAccount[a.id] || []).length,
+    }));
+  }
+
+  main.className = 'wide';
   main.innerHTML = `<h2>勘定科目 / 補助科目</h2>
   <div class="toolbar no-print">
-    <div class="field"><span>検索</span><input id="a-q" style="width:180px" placeholder="コード・名称"></div>
-    <div class="field"><span>表示区分</span><select id="a-grp"><option value="">(すべて)</option>${S.meta.groups.map(g => `<option>${g.grp}</option>`).join('')}</select></div>
-    <label><input type="checkbox" id="a-inactive"> 無効科目も表示</label>
-    <button id="a-new" class="primary">科目を追加</button>
-    <a class="btn" href="/api/clients/${S.client.id}/export/accounts.csv">科目一覧 CSV</a>
+    <div class="field"><span>検索</span><input id="a-q" style="width:170px" placeholder="コード・名称・かな"></div>
+    <div class="field"><span>表示区分</span><select id="a-grp"><option value="">(すべて)</option>${S.meta.groups.map(g => `<option>${esc(g.grp)}</option>`).join('')}</select></div>
+    <label><input type="checkbox" id="a-inactive" checked> 無効科目も表示</label>
+    <button id="a-add">行を追加</button>
+    <button id="a-renumber" title="表示区分とコード順に並び順を振り直します">並び順を整理</button>
+    <span style="flex:1"></span>
+    <button id="a-import">CSV 取込</button>
+    <button id="a-copy">他の顧問先から複写</button>
+    <a class="btn" href="/api/clients/${S.client.id}/export/accounts.csv">CSV 出力</a>
+    <button id="a-save" class="primary">変更を保存</button>
   </div>
-  <div class="panel"><table class="grid compact" id="a-table"><thead><tr>
-    <th>コード</th><th>科目名</th><th>かな</th><th>表示区分</th><th>既定の税区分</th><th>補助科目</th><th>状態</th><th></th>
-  </tr></thead><tbody></tbody></table></div>`;
+  <div class="panel" style="padding-top:6px">
+    <div class="row between" style="margin-bottom:4px">
+      <span class="muted">コード・科目名はそのまま書き換えられます。仕訳は科目 ID で結び付いているため、コードを変えても過去の入力は失われません。</span>
+      <span id="a-status" class="muted"></span>
+    </div>
+    <div class="scroll-x"><table class="grid compact sticky-head" id="a-table"><thead><tr>
+      <th style="width:90px">コード</th><th style="width:200px">科目名</th><th style="width:150px">かな</th>
+      <th style="width:170px">表示区分</th><th style="width:160px">既定の税区分</th><th style="width:150px">役割</th>
+      <th style="width:70px">並び順</th><th style="width:60px">有効</th><th style="width:110px">補助科目</th><th style="width:50px"></th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>`;
 
-  function taxOpts(v) { return selectInput('default_tax_class', S.meta.tax_classes.map(t => ({ value: t.code, label: `${t.code} ${t.name}` })), v); }
-  function grpOpts(v) { return selectInput('grp', S.meta.groups.map(g => ({ value: g.grp, label: g.grp })), v); }
-  function roleOpts(v) {
-    return selectInput('role', [
-      { value: '', label: '(なし)' }, { value: 'tax_receivable', label: '仮払消費税' }, { value: 'tax_payable', label: '仮受消費税' },
-      { value: 'retained', label: '繰越利益剰余金 (法人・繰越先)' }, { value: 'owner_capital', label: '元入金 (個人・繰越先)' },
-      { value: 'owner_drawing', label: '事業主貸' }, { value: 'owner_contrib', label: '事業主借' }, { value: 'suspense', label: '諸口' },
-    ], v);
+  const grpOptions = S.meta.groups.map(g => `<option value="${esc(g.grp)}">${esc(g.grp)}</option>`).join('');
+  const taxOptions = S.meta.tax_classes.map(t => `<option value="${t.code}">${t.code} ${esc(t.name)}</option>`).join('');
+  const roleOptions = (S.meta.roles || [{ code: '', name: '(なし)' }])
+    .map(r => `<option value="${r.code}">${esc(r.name)}</option>`).join('');
+
+  function markDirty() {
+    dirty = true;
+    $('#a-status').innerHTML = '<span class="badge warn">未保存の変更があります</span>';
   }
-  function accountForm(a) {
-    const isNew = !a;
-    a = a || { code: '', name: '', kana: '', grp: '販売費及び一般管理費', default_tax_class: '00', role: '', active: 1 };
-    formModal(isNew ? '科目の追加' : '科目の修正',
-      field('コード', textInput('code', a.code, 'required maxlength="10"')) + field('科目名', textInput('name', a.name, 'required')) +
-      field('かな (検索用)', textInput('kana', a.kana)) + field('表示区分', grpOpts(a.grp)) +
-      field('既定の消費税区分', taxOpts(a.default_tax_class)) + field('特殊な役割', roleOpts(a.role)) +
-      field('有効', checkInput('active', a.active)),
-      async (d) => {
-        const body = { code: d.code.trim(), name: d.name.trim(), kana: d.kana.trim(), grp: d.grp, default_tax_class: d.default_tax_class, role: d.role, active: !!d.active };
-        if (isNew) await POST(`/api/clients/${S.client.id}/accounts`, body); else await PUT(`/api/accounts/${a.id}`, body);
-        await loadAccounts(); draw(); toast('保存しました');
-      });
+  function clearDirty() {
+    dirty = false;
+    deleted = [];
+    $('#a-status').textContent = '';
   }
-  function subForm(acct, s) {
-    const isNew = !s;
-    s = s || { code: '', name: '', kana: '', active: 1 };
-    formModal(`${acct.code} ${acct.name} の補助科目${isNew ? '追加' : '修正'}`,
-      field('コード', textInput('code', s.code, 'required maxlength="10"')) + field('名称', textInput('name', s.name, 'required')) +
-      field('かな (検索用)', textInput('kana', s.kana)) + field('有効', checkInput('active', s.active)),
-      async (d) => {
-        const body = { code: d.code.trim(), name: d.name.trim(), kana: d.kana.trim(), active: !!d.active };
-        if (isNew) await POST(`/api/accounts/${acct.id}/sub-accounts`, body); else await PUT(`/api/sub-accounts/${s.id}`, body);
-        await loadAccounts(); draw(); toast('保存しました');
-      });
-  }
-  const expanded = new Set();
-  function draw() {
+
+  function visible() {
     const q = $('#a-q').value.trim().toLowerCase();
     const grp = $('#a-grp').value;
     const inactive = $('#a-inactive').checked;
-    const rows = [];
-    let lastGrp = null;
-    for (const a of S.accounts) {
-      if (!inactive && !a.active) continue;
-      if (grp && a.grp !== grp) continue;
-      if (q && !(a.code.toLowerCase().includes(q) || a.name.toLowerCase().includes(q) || (a.kana || '').includes(q))) continue;
-      if (a.grp !== lastGrp) { rows.push(`<tr class="group"><td colspan="8">【${esc(a.grp)}】</td></tr>`); lastGrp = a.grp; }
-      const subs = S.subsByAccount[a.id] || [];
-      rows.push(`<tr data-id="${a.id}"><td class="code">${esc(a.code)}</td><td>${esc(a.name)}${a.role ? ` <span class="badge">${esc(a.role)}</span>` : ''}</td><td class="muted">${esc(a.kana)}</td>
-        <td>${esc(a.grp)}</td><td>${esc(taxName(a.default_tax_class))}</td>
-        <td><button class="small" data-toggle="${a.id}">${subs.length} 件 ${expanded.has(a.id) ? '▲' : '▼'}</button> <button class="small" data-addsub="${a.id}">＋追加</button></td>
-        <td>${a.active ? '<span class="badge ok">有効</span>' : '<span class="badge">無効</span>'}</td>
-        <td style="white-space:nowrap"><button class="small" data-edit="${a.id}">修正</button> <button class="small danger" data-del="${a.id}">削除</button></td></tr>`);
-      if (expanded.has(a.id)) {
-        for (const s of subs) {
-          rows.push(`<tr class="sub"><td class="code"></td><td class="name">${esc(s.code)} ${esc(s.name)}</td><td class="muted">${esc(s.kana)}</td><td colspan="3" class="muted">補助科目</td>
-            <td>${s.active ? '<span class="badge ok">有効</span>' : '<span class="badge">無効</span>'}</td>
-            <td style="white-space:nowrap"><button class="small" data-editsub="${s.id}">修正</button> <button class="small danger" data-delsub="${s.id}">削除</button></td></tr>`);
-        }
-        if (!subs.length) rows.push(`<tr class="sub"><td></td><td colspan="7" class="muted">補助科目はありません</td></tr>`);
-      }
-    }
-    $('#a-table tbody').innerHTML = rows.join('') || '<tr><td colspan="8" class="empty">科目がありません</td></tr>';
+    return rows.filter(r => {
+      if (!inactive && !r.active) return false;
+      if (grp && r.grp !== grp) return false;
+      if (q && !((r.code || '').toLowerCase().includes(q) || (r.name || '').toLowerCase().includes(q) || (r.kana || '').includes(q))) return false;
+      return true;
+    });
   }
-  $('#a-table').onclick = async (e) => {
+
+  function draw() {
+    const list = visible();
+    const out = [];
+    let lastGrp = null;
+    for (const r of list) {
+      if (r.grp !== lastGrp) { out.push(`<tr class="group"><td colspan="10">【${esc(r.grp)}】</td></tr>`); lastGrp = r.grp; }
+      const i = rows.indexOf(r);
+      out.push(`<tr data-i="${i}">
+        <td><input class="code" data-f="code" value="${esc(r.code)}" maxlength="10"></td>
+        <td><input data-f="name" value="${esc(r.name)}"></td>
+        <td><input data-f="kana" value="${esc(r.kana || '')}"></td>
+        <td><select data-f="grp">${grpOptions}</select></td>
+        <td><select data-f="default_tax_class">${taxOptions}</select></td>
+        <td><select data-f="role">${roleOptions}</select></td>
+        <td><input class="num" data-f="sort_order" value="${r.sort_order}"></td>
+        <td class="center"><input type="checkbox" data-f="active" ${r.active ? 'checked' : ''}></td>
+        <td class="center">${r.id === null ? '<span class="muted">保存後に設定</span>'
+          : `<button class="small" data-subs="${r.id}">${r.sub_count} 件 編集</button>`}</td>
+        <td class="center"><button class="small danger" data-del="${i}" title="この行を削除">×</button></td>
+      </tr>`);
+    }
+    $('#a-table tbody').innerHTML = out.join('') || '<tr><td colspan="10" class="empty">該当する科目がありません</td></tr>';
+    // select の初期値は value 属性では指定できないので個別に設定する
+    for (const tr of $$('#a-table tbody tr[data-i]')) {
+      const r = rows[Number(tr.dataset.i)];
+      tr.querySelector('[data-f=grp]').value = r.grp;
+      tr.querySelector('[data-f=default_tax_class]').value = r.default_tax_class;
+      tr.querySelector('[data-f=role]').value = r.role || '';
+    }
+    $('#a-status').innerHTML = dirty ? '<span class="badge warn">未保存の変更があります</span>'
+      : `<span class="muted">${rows.length} 科目</span>`;
+  }
+
+  $('#a-table').addEventListener('input', (e) => {
+    const tr = e.target.closest('tr[data-i]');
+    if (!tr || !e.target.dataset.f) return;
+    const r = rows[Number(tr.dataset.i)];
+    const f = e.target.dataset.f;
+    if (f === 'active') r[f] = e.target.checked;
+    else if (f === 'sort_order') r[f] = parseAmount(e.target.value);
+    else r[f] = e.target.value;
+    markDirty();
+  });
+  $('#a-table').addEventListener('change', (e) => {
+    const tr = e.target.closest('tr[data-i]');
+    if (!tr || !e.target.dataset.f) return;
+    const r = rows[Number(tr.dataset.i)];
+    const f = e.target.dataset.f;
+    r[f] = f === 'active' ? e.target.checked : e.target.value;
+    markDirty();
+    if (f === 'grp') draw();   // 表示区分が変わると並ぶ位置が変わる
+  });
+  $('#a-table').addEventListener('click', async (e) => {
     const b = e.target.closest('button');
     if (!b) return;
-    const ds = b.dataset;
-    try {
-      if (ds.toggle) { const id = Number(ds.toggle); expanded.has(id) ? expanded.delete(id) : expanded.add(id); draw(); }
-      else if (ds.edit) accountForm(S.accountById[Number(ds.edit)]);
-      else if (ds.del) {
-        const a = S.accountById[Number(ds.del)];
-        if (await confirmDialog(`科目 ${a.code} ${a.name} を削除します。よろしいですか？`)) { await DEL(`/api/accounts/${a.id}`); await loadAccounts(); draw(); toast('削除しました'); }
-      }
-      else if (ds.addsub) { expanded.add(Number(ds.addsub)); subForm(S.accountById[Number(ds.addsub)]); }
-      else if (ds.editsub) { const s = S.subById[Number(ds.editsub)]; subForm(S.accountById[s.account_id], s); }
-      else if (ds.delsub) {
-        const s = S.subById[Number(ds.delsub)];
-        if (await confirmDialog(`補助科目 ${s.name} を削除します。よろしいですか？`)) { await DEL(`/api/sub-accounts/${s.id}`); await loadAccounts(); draw(); toast('削除しました'); }
-      }
-    } catch (err) { showError(err); }
+    if (b.dataset.del !== undefined) {
+      const i = Number(b.dataset.del);
+      const r = rows[i];
+      if (r.id !== null && !(await confirmDialog(`${r.code} ${r.name} を削除します。仕訳で使用されている科目は削除できません。よろしいですか？`))) return;
+      if (r.id !== null) deleted.push(r.id);
+      rows.splice(i, 1);
+      markDirty();
+      draw();
+    } else if (b.dataset.subs) {
+      openSubs(Number(b.dataset.subs));
+    }
+  });
+
+  $('#a-add').onclick = () => {
+    const grp = $('#a-grp').value || '販売費及び一般管理費';
+    const max = rows.filter(r => r.grp === grp).reduce((m, r) => Math.max(m, Number(r.sort_order) || 0), 0);
+    rows.push({ id: null, code: '', name: '', kana: '', grp, default_tax_class: '00', role: '', sort_order: max + 1, active: true, sub_count: 0 });
+    markDirty();
+    draw();
+    const trs = $$('#a-table tbody tr[data-i]');
+    const last = trs[trs.length - 1];
+    if (last) last.querySelector('[data-f=code]').focus();
   };
-  $('#a-new').onclick = () => accountForm(null);
+  $('#a-renumber').onclick = () => {
+    const order = Object.fromEntries(S.meta.groups.map((g, i) => [g.grp, i]));
+    rows.sort((a, b) => (order[a.grp] - order[b.grp]) || String(a.code).localeCompare(String(b.code)));
+    rows.forEach((r, i) => { r.sort_order = (i + 1) * 10; });
+    markDirty();
+    draw();
+    toast('表示区分とコード順に並び順を振り直しました。保存してください');
+  };
+
+  $('#a-save').onclick = async () => {
+    const dup = {};
+    for (const r of rows) {
+      const code = String(r.code).trim();
+      if (!code || !String(r.name).trim()) { toast('コードと科目名は必須です', true); return; }
+      if (dup[code]) { toast(`コード ${code} が重複しています`, true); return; }
+      dup[code] = true;
+    }
+    try {
+      const body = {
+        items: rows.map(r => ({
+          id: r.id, code: String(r.code).trim(), name: String(r.name).trim(), kana: String(r.kana || '').trim(),
+          grp: r.grp, default_tax_class: r.default_tax_class, role: r.role || '',
+          sort_order: Number(r.sort_order) || 0, active: !!r.active,
+        })),
+        delete_ids: deleted,
+      };
+      const res = await PUT(`/api/clients/${S.client.id}/accounts/bulk`, body);
+      await loadAccounts();
+      rows = snapshot();
+      clearDirty();
+      draw();
+      toast(`保存しました (追加 ${res.created} / 更新 ${res.updated} / 削除 ${res.deleted})`);
+    } catch (e) { showError(e); }
+  };
+
+  // ---------------------------------------------------------------- 補助科目
+  function openSubs(accountId) {
+    const acct = S.accountById[accountId];
+    modal(`<h3>${esc(acct.code)} ${esc(acct.name)} の補助科目</h3>
+      <table class="grid compact" id="sub-table"><thead><tr><th style="width:80px">コード</th><th>名称</th><th style="width:140px">かな</th><th style="width:60px">有効</th><th style="width:40px"></th></tr></thead><tbody></tbody></table>
+      <div class="row" style="margin-top:8px"><button id="sub-add">行を追加</button></div>
+      <div class="actions"><button data-close>閉じる</button><button class="primary" id="sub-save">保存</button></div>`, {
+      onOpen(bg, close) {
+        const list = (S.subsByAccount[accountId] || []).map(s => ({ ...s }));
+        const removed = [];
+        const drawSubs = () => {
+          $('#sub-table tbody', bg).innerHTML = list.map((s, i) => `<tr data-i="${i}">
+            <td><input class="code" data-f="code" value="${esc(s.code)}" maxlength="10"></td>
+            <td><input data-f="name" value="${esc(s.name)}"></td>
+            <td><input data-f="kana" value="${esc(s.kana || '')}"></td>
+            <td class="center"><input type="checkbox" data-f="active" ${s.active ? 'checked' : ''}></td>
+            <td class="center"><button class="small danger" data-del="${i}">×</button></td></tr>`).join('')
+            || '<tr><td colspan="5" class="empty">補助科目はありません</td></tr>';
+        };
+        const onEdit = (e) => {
+          const tr = e.target.closest('tr[data-i]');
+          if (!tr || !e.target.dataset.f) return;
+          const s = list[Number(tr.dataset.i)];
+          s[e.target.dataset.f] = e.target.dataset.f === 'active' ? e.target.checked : e.target.value;
+        };
+        $('#sub-table', bg).addEventListener('input', onEdit);
+        $('#sub-table', bg).addEventListener('change', onEdit);
+        $('#sub-table', bg).addEventListener('click', (e) => {
+          const b = e.target.closest('[data-del]');
+          if (!b) return;
+          const i = Number(b.dataset.del);
+          if (list[i].id) removed.push(list[i].id);
+          list.splice(i, 1);
+          drawSubs();
+        });
+        $('#sub-add', bg).onclick = () => {
+          list.push({ id: null, code: String(list.length + 1), name: '', kana: '', active: true });
+          drawSubs();
+          const trs = $$('#sub-table tbody tr[data-i]', bg);
+          const last = trs[trs.length - 1];
+          if (last) last.querySelector('[data-f=name]').focus();
+        };
+        $('#sub-save', bg).onclick = async () => {
+          for (const s of list) {
+            if (!String(s.code).trim() || !String(s.name).trim()) { toast('コードと名称は必須です', true); return; }
+          }
+          try {
+            for (const id of removed) await DEL(`/api/sub-accounts/${id}`);
+            for (const s of list) {
+              const body = { code: String(s.code).trim(), name: String(s.name).trim(), kana: String(s.kana || '').trim(), active: !!s.active };
+              if (s.id) await PUT(`/api/sub-accounts/${s.id}`, body);
+              else await POST(`/api/accounts/${accountId}/sub-accounts`, body);
+            }
+            await loadAccounts();
+            rows = snapshot();
+            draw();
+            close();
+            toast('補助科目を保存しました');
+          } catch (e) { showError(e); }
+        };
+        drawSubs();
+      },
+    });
+  }
+
+  // ---------------------------------------------------------------- CSV 取込
+  $('#a-import').onclick = () => {
+    modal(`<h3>勘定科目 CSV の取込</h3>
+      <p class="muted" style="margin-top:0">列: コード, 科目名, かな, 表示区分, 既定の税区分, 役割, 並び順, 有効<br>
+      「コード」で既存の科目と照合します。文字コードは UTF-8 / Shift_JIS のどちらでも構いません。</p>
+      <div class="form">
+        <label class="field wide"><span>CSV ファイル</span><input type="file" id="ai-file" accept=".csv,text/csv"></label>
+        <label class="field wide"><span>取込方法</span>
+          <select id="ai-mode">
+            <option value="merge">追加・更新のみ (CSV に無い既存科目はそのまま残す)</option>
+            <option value="replace">CSV の内容に置き換える (CSV に無い既存科目は削除または無効化)</option>
+          </select></label>
+      </div>
+      <div id="ai-result" style="margin-top:10px"></div>
+      <div class="actions">
+        <a class="btn" href="/api/export/accounts-template.csv" style="margin-right:auto">記入例をダウンロード</a>
+        <button data-close>閉じる</button><button id="ai-check">内容を確認</button><button class="primary" id="ai-run">取込</button>
+      </div>`, {
+      onOpen(bg) {
+        const res = $('#ai-result', bg);
+        const send = async (dry) => {
+          const f = $('#ai-file', bg).files[0];
+          if (!f) { toast('CSV ファイルを選択してください', true); return; }
+          const fd = new FormData();
+          fd.append('file', f);
+          res.innerHTML = '処理中...';
+          try {
+            const mode = $('#ai-mode', bg).value;
+            const r = await api('POST', `/api/clients/${S.client.id}/import/accounts?mode=${mode}&dry_run=${dry}`, fd);
+            const warn = (r.warnings || []).map(w => `<div class="badge danger" style="display:block;margin-top:4px">${esc(w)}</div>`).join('');
+            const names = [];
+            if (r.deleted_names && r.deleted_names.length) names.push(`削除: ${r.deleted_names.map(esc).join(', ')}`);
+            if (r.deactivated_names && r.deactivated_names.length) names.push(`無効化 (仕訳で使用中): ${r.deactivated_names.map(esc).join(', ')}`);
+            res.innerHTML = `<span class="badge ok">${dry ? '確認' : '取込完了'}</span>
+              追加 ${r.created} / 更新 ${r.updated} / 削除 ${r.deleted} / 無効化 ${r.deactivated}${r.kept ? ` / 変更なし ${r.kept}` : ''}
+              ${names.length ? `<div class="muted" style="margin-top:4px">${names.join('<br>')}</div>` : ''}${warn}`;
+            if (!dry) {
+              await loadAccounts();
+              rows = snapshot();
+              clearDirty();
+              draw();
+              toast(`科目表を取り込みました (追加 ${r.created} / 更新 ${r.updated})`);
+            }
+          } catch (e) {
+            res.innerHTML = `<span class="badge danger">エラー</span> ${esc(e.message)}`;
+          }
+        };
+        $('#ai-check', bg).onclick = () => send(true);
+        $('#ai-run', bg).onclick = async () => {
+          if (await confirmDialog('CSV の内容で科目表を更新します。よろしいですか？')) await send(false);
+        };
+      },
+    });
+  };
+
+  // ---------------------------------------------------------------- 他顧問先から複写
+  $('#a-copy').onclick = () => {
+    const others = S.clients.filter(c => c.id !== S.client.id);
+    if (!others.length) { toast('複写元にできる顧問先がありません', true); return; }
+    modal(`<h3>他の顧問先から科目表を複写</h3>
+      <p class="muted" style="margin-top:0">事務所共通の科目表を 1 件の顧問先で整えておき、他の顧問先へ複写できます。</p>
+      <div class="form">
+        <label class="field wide"><span>複写元の顧問先</span>
+          <select id="ac-src">${others.map(c => `<option value="${c.id}">${esc(c.code)} ${esc(c.name)}</option>`).join('')}</select></label>
+        <label class="field wide"><span>複写方法</span>
+          <select id="ac-mode">
+            <option value="merge">追加・更新のみ</option>
+            <option value="replace">複写元に無い科目は削除または無効化する</option>
+          </select></label>
+        <label class="field wide"><input type="checkbox" id="ac-subs"> 補助科目も複写する</label>
+      </div>
+      <div class="actions"><button data-close>キャンセル</button><button class="primary" id="ac-run">複写</button></div>`, {
+      onOpen(bg, close) {
+        $('#ac-run', bg).onclick = async () => {
+          const src = $('#ac-src', bg).value;
+          const mode = $('#ac-mode', bg).value;
+          const subs = $('#ac-subs', bg).checked;
+          if (!(await confirmDialog('選択した顧問先の科目表を複写します。よろしいですか？'))) return;
+          try {
+            const r = await POST(`/api/clients/${S.client.id}/accounts/copy-from/${src}?mode=${mode}&with_subs=${subs}`);
+            await loadAccounts();
+            rows = snapshot();
+            clearDirty();
+            draw();
+            close();
+            toast(`複写しました (追加 ${r.created} / 更新 ${r.updated} / 削除 ${r.deleted} / 無効化 ${r.deactivated}${r.sub_accounts ? ` / 補助 ${r.sub_accounts}` : ''})`);
+          } catch (e) { showError(e); }
+        };
+      },
+    });
+  };
+
   $('#a-q').oninput = $('#a-grp').onchange = $('#a-inactive').onchange = draw;
+
+  const warnUnsaved = (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } };
+  window.addEventListener('beforeunload', warnUnsaved);
+
+  rows = snapshot();
   draw();
+  return () => window.removeEventListener('beforeunload', warnUnsaved);
 };
 
 // ---------------------------------------------------------------- 部門
@@ -299,9 +544,11 @@ routes.clients = async function (main) {
       field('消費税の経理方式', selectInput('tax_method', S.meta.tax_methods.map(x => ({ value: x.code, label: x.name })), c.tax_method)) +
       field('期首月 (法人)', selectInput('fiscal_start_month', Array.from({ length: 12 }, (_, i) => ({ value: i + 1, label: `${i + 1}月` })), c.fiscal_start_month)) +
       field('備考', textInput('note', c.note), true) +
-      (isNew ? '<div class="field wide muted">追加時に標準の勘定科目表と当期の会計期間が自動作成されます。</div>' : ''),
+      (isNew ? field('標準の勘定科目表を入れる', checkInput('copy_standard_accounts', true), true) +
+        '<div class="field wide muted">チェックを外すと科目が空の状態で作成されます。自前の科目表を CSV で取り込む場合や、他の顧問先から複写する場合に使ってください。会計期間は当期が自動作成されます。</div>' : ''),
       async (d) => {
         const body = { code: d.code.trim(), name: d.name.trim(), kana: d.kana.trim(), entity_type: d.entity_type, tax_method: d.tax_method, fiscal_start_month: Number(d.fiscal_start_month), note: d.note };
+        if (isNew) body.copy_standard_accounts = !!d.copy_standard_accounts;
         let saved;
         if (isNew) saved = await POST('/api/clients', body); else saved = await PUT(`/api/clients/${c.id}`, body);
         S.clients = await GET('/api/clients');

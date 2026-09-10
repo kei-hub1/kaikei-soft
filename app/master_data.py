@@ -29,6 +29,58 @@ def tax_class(code: str) -> dict:
     return TAX_CLASS_MAP.get(code or "00", TAX_CLASS_MAP["00"])
 
 
+def resolve_tax_class(value: str) -> str | None:
+    """CSV 取込用: コード / 正式名称 / 略称 のいずれからでも税区分コードを引く。"""
+    v = (value or "").strip()
+    if v == "":
+        return "00"
+    if v in TAX_CLASS_MAP:
+        return v
+    for t in TAX_CLASSES:
+        if v in (t["name"], t["short"]):
+            return t["code"]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 科目の特殊な役割
+#   帳票や繰越処理で特別扱いする科目を指定する。科目コードや名称を自由に
+#   変更しても処理が壊れないよう、コードではなくこの役割で識別する。
+# ---------------------------------------------------------------------------
+ROLES: list[dict] = [
+    {"code": "", "name": "(なし)", "note": ""},
+    {"code": "tax_receivable", "name": "仮払消費税", "note": "税抜経理で課税仕入の消費税を転記する先"},
+    {"code": "tax_payable", "name": "仮受消費税", "note": "税抜経理で課税売上の消費税を転記する先"},
+    {"code": "retained", "name": "繰越利益剰余金", "note": "法人: 繰越処理で当期純利益を加算する先"},
+    {"code": "owner_capital", "name": "元入金", "note": "個人: 繰越処理で所得と事業主勘定を加算する先"},
+    {"code": "owner_drawing", "name": "事業主貸", "note": "個人: 繰越処理で元入金へ振り替える"},
+    {"code": "owner_contrib", "name": "事業主借", "note": "個人: 繰越処理で元入金へ振り替える"},
+    {"code": "suspense", "name": "諸口", "note": ""},
+]
+ROLE_CODES = {r["code"] for r in ROLES}
+ROLE_NAME_BY_CODE = {r["code"]: r["name"] for r in ROLES}
+
+
+def resolve_role(value: str) -> str | None:
+    """CSV 取込用: 役割をコードまたは日本語名から引く。"""
+    v = (value or "").strip()
+    if v in ("", "(なし)", "なし", "-"):
+        return ""
+    if v in ROLE_CODES:
+        return v
+    for r in ROLES:
+        if v == r["name"]:
+            return r["code"]
+    return None
+
+
+def resolve_bool(value: str, default: bool = True) -> bool:
+    v = (value or "").strip().lower()
+    if v == "":
+        return default
+    return v not in ("0", "false", "no", "n", "×", "x", "無効", "off")
+
+
 def is_taxable(code: str) -> bool:
     t = tax_class(code)
     return t["kind"] in ("sales", "purchase") and t["rate"] > 0

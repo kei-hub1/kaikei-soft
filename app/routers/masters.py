@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..db import db, rows_to_dicts
-from ..master_data import GROUPS, GROUP_MAP, TAX_CLASSES, TAX_CLASS_MAP
+from ..master_data import GROUPS, GROUP_MAP, ROLE_CODES, ROLES, TAX_CLASSES, TAX_CLASS_MAP
 
 router = APIRouter(prefix="/api", tags=["masters"])
 
@@ -15,6 +15,7 @@ def meta():
     return {
         "tax_classes": TAX_CLASSES,
         "groups": GROUPS,
+        "roles": ROLES,
         "entity_types": [{"code": "corp", "name": "法人"}, {"code": "sole", "name": "個人"}],
         "tax_methods": [
             {"code": "inclusive", "name": "税込経理"},
@@ -64,6 +65,8 @@ def _validate_account(a: AccountIn) -> None:
         raise HTTPException(400, "表示区分が不正です")
     if a.default_tax_class not in TAX_CLASS_MAP:
         raise HTTPException(400, "消費税区分が不正です")
+    if a.role not in ROLE_CODES:
+        raise HTTPException(400, "科目の役割が不正です")
 
 
 @router.post("/clients/{client_id}/accounts", status_code=201)
@@ -115,9 +118,149 @@ def delete_account(account_id: int):
         conn.execute("DELETE FROM accounts WHERE id=?", (account_id,))
 
 
+class AccountEdit(AccountIn):
+    """id を持つ場合は更新、持たない場合は新規追加。"""
+    id: int | None = None
+
+
+class AccountsBulkIn(BaseModel):
+    items: list[AccountEdit]
+    delete_ids: list[int] = []
+
+
+@router.put("/clients/{client_id}/accounts/bulk")
+def save_accounts_bulk(client_id: int, body: AccountsBulkIn):
+    """勘定科目の一括保存。コード・名称の変更、追加、削除をまとめて反映する。
+
+    仕訳や期首残高は科目 ID で結び付いているため、コードや名称を変更しても
+    過去の入力内容には影響しない。
+    """
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM clients WHERE id=?", (client_id,)).fetchone():
+            raise HTTPException(404, "顧問先が見つかりません")
+        existing = {r["id"]: dict(r) for r in conn.execute(
+            "SELECT * FROM accounts WHERE client_id=?", (client_id,)).fetchall()}
+
+        # コード重複の事前チェック (削除対象を除く)
+        seen: dict[str, int] = {}
+        for i, a in enumerate(body.items, 1):
+            _validate_account(a)
+            code = a.code.strip()
+            if code in seen:
+                raise HTTPException(409, f"コード {code} が {seen[code]} 行目と {i} 行目で重複しています")
+            seen[code] = i
+            if a.id is not None and a.id not in existing:
+                raise HTTPException(400, f"{i} 行目: 存在しない科目です")
+
+        deleted = 0
+        for aid in body.delete_ids:
+            if aid not in existing:
+                continue
+            used = conn.execute(
+                "SELECT COUNT(*) FROM journal_lines WHERE debit_account_id=? OR credit_account_id=?",
+                (aid, aid)).fetchone()[0]
+            if used:
+                raise HTTPException(409, f"{existing[aid]['code']} {existing[aid]['name']} は仕訳で {used} 件使用されているため削除できません")
+            conn.execute("DELETE FROM opening_balances WHERE account_id=?", (aid,))
+            conn.execute("DELETE FROM accounts WHERE id=?", (aid,))
+            deleted += 1
+
+        created = updated = 0
+        for order, a in enumerate(body.items):
+            sort_order = a.sort_order if a.sort_order is not None else order * 10
+            values = (a.code.strip(), a.name.strip(), a.kana.strip(), GROUP_MAP[a.grp], a.grp,
+                      a.default_tax_class, a.role, sort_order, int(a.active))
+            if a.id is None:
+                conn.execute(
+                    "INSERT INTO accounts(code,name,kana,category,grp,default_tax_class,role,sort_order,active,client_id) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)", values + (client_id,))
+                created += 1
+            else:
+                conn.execute(
+                    "UPDATE accounts SET code=?,name=?,kana=?,category=?,grp=?,default_tax_class=?,role=?,sort_order=?,active=? "
+                    "WHERE id=? AND client_id=?", values + (a.id, client_id))
+                updated += 1
+        return {"created": created, "updated": updated, "deleted": deleted}
+
+
 # ---------------------------------------------------------------------------
 # 補助科目
 # ---------------------------------------------------------------------------
+
+@router.post("/clients/{client_id}/accounts/copy-from/{source_id}")
+def copy_accounts_from(client_id: int, source_id: int, mode: str = "merge", with_subs: bool = False):
+    """他の顧問先の科目表を複写する。事務所共通の科目表を使い回すための機能。
+
+    mode="merge"   : コードが一致する科目は上書きし、無いものは追加する。
+    mode="replace" : 上記に加え、複写元に無い科目を無効化する (仕訳未使用なら削除)。
+    """
+    if mode not in ("merge", "replace"):
+        raise HTTPException(400, "mode は merge / replace のいずれか")
+    if client_id == source_id:
+        raise HTTPException(400, "複写元と複写先が同じです")
+    with db() as conn:
+        for cid in (client_id, source_id):
+            if not conn.execute("SELECT 1 FROM clients WHERE id=?", (cid,)).fetchone():
+                raise HTTPException(404, "顧問先が見つかりません")
+        src = [dict(r) for r in conn.execute(
+            "SELECT * FROM accounts WHERE client_id=? ORDER BY sort_order, code", (source_id,)).fetchall()]
+        if not src:
+            raise HTTPException(400, "複写元に勘定科目がありません")
+        dst = {r["code"]: dict(r) for r in conn.execute(
+            "SELECT * FROM accounts WHERE client_id=?", (client_id,)).fetchall()}
+        src_codes = {a["code"] for a in src}
+
+        created = updated = deleted = deactivated = 0
+        id_map: dict[int, int] = {}
+        for a in src:
+            cur = dst.get(a["code"])
+            values = (a["name"], a["kana"], a["category"], a["grp"], a["default_tax_class"], a["role"],
+                      a["sort_order"], a["active"])
+            if cur:
+                conn.execute(
+                    "UPDATE accounts SET name=?,kana=?,category=?,grp=?,default_tax_class=?,role=?,sort_order=?,active=? WHERE id=?",
+                    values + (cur["id"],))
+                id_map[a["id"]] = cur["id"]
+                updated += 1
+            else:
+                c = conn.execute(
+                    "INSERT INTO accounts(name,kana,category,grp,default_tax_class,role,sort_order,active,client_id,code) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)", values + (client_id, a["code"]))
+                id_map[a["id"]] = c.lastrowid
+                created += 1
+
+        if mode == "replace":
+            for code, a in dst.items():
+                if code in src_codes:
+                    continue
+                used = conn.execute(
+                    "SELECT COUNT(*) FROM journal_lines WHERE debit_account_id=? OR credit_account_id=?",
+                    (a["id"], a["id"])).fetchone()[0]
+                if used:
+                    conn.execute("UPDATE accounts SET active=0 WHERE id=?", (a["id"],))
+                    deactivated += 1
+                else:
+                    conn.execute("DELETE FROM opening_balances WHERE account_id=?", (a["id"],))
+                    conn.execute("DELETE FROM accounts WHERE id=?", (a["id"],))
+                    deleted += 1
+
+        subs = 0
+        if with_subs:
+            for s in conn.execute(
+                "SELECT s.* FROM sub_accounts s JOIN accounts a ON a.id=s.account_id WHERE a.client_id=?",
+                (source_id,)).fetchall():
+                target = id_map.get(s["account_id"])
+                if target is None:
+                    continue
+                if conn.execute("SELECT 1 FROM sub_accounts WHERE account_id=? AND code=?",
+                                (target, s["code"])).fetchone():
+                    continue
+                conn.execute("INSERT INTO sub_accounts(account_id,code,name,kana,active) VALUES(?,?,?,?,?)",
+                             (target, s["code"], s["name"], s["kana"], s["active"]))
+                subs += 1
+        return {"created": created, "updated": updated, "deleted": deleted,
+                "deactivated": deactivated, "sub_accounts": subs}
+
 
 class SubAccountIn(BaseModel):
     code: str = Field(min_length=1, max_length=10)

@@ -21,6 +21,8 @@ class ClientIn(BaseModel):
     tax_method: str = "inclusive"
     fiscal_start_month: int = Field(default=4, ge=1, le=12)
     note: str = ""
+    # 新規作成時のみ有効。False の場合は科目を空で作り、CSV 取込で自前の科目表を入れる。
+    copy_standard_accounts: bool = True
 
 
 class FiscalYearIn(BaseModel):
@@ -70,12 +72,13 @@ def create_client(c: ClientIn):
             (c.code, c.name, c.kana, c.entity_type, c.tax_method, c.fiscal_start_month, c.note, now_iso()),
         )
         cid = cur.lastrowid
-        # 標準勘定科目を複写
-        conn.executemany(
-            "INSERT INTO accounts(client_id,code,name,kana,category,grp,default_tax_class,role,sort_order) VALUES(?,?,?,?,?,?,?,?,?)",
-            [(cid, a["code"], a["name"], a["kana"], a["category"], a["grp"], a["default_tax_class"], a["role"], a["sort_order"])
-             for a in standard_accounts_for(c.entity_type)],
-        )
+        # 標準勘定科目を複写 (科目表を CSV で入れる場合は複写しない)
+        if c.copy_standard_accounts:
+            conn.executemany(
+                "INSERT INTO accounts(client_id,code,name,kana,category,grp,default_tax_class,role,sort_order) VALUES(?,?,?,?,?,?,?,?,?)",
+                [(cid, a["code"], a["name"], a["kana"], a["category"], a["grp"], a["default_tax_class"], a["role"], a["sort_order"])
+                 for a in standard_accounts_for(c.entity_type)],
+            )
         # 初期会計期間
         s, e = _default_fy(c.fiscal_start_month, c.entity_type)
         conn.execute("INSERT INTO fiscal_years(client_id,start_date,end_date,label) VALUES(?,?,?,?)",

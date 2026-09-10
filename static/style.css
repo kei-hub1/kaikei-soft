@@ -143,6 +143,19 @@ table.grid tr.sub td.name { padding-left: 24px; }
 table.grid tr.clickable { cursor: pointer; }
 table.grid td.muted { color: var(--muted); }
 table.grid td.neg, .neg { color: var(--danger); }
+/* 一覧内でそのまま編集する入力欄 (勘定科目のマスタ保守など) */
+table.grid td > input[type=text], table.grid td > input:not([type]), table.grid td > select {
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 2px 4px;
+  border-radius: 2px;
+}
+table.grid td > input:hover, table.grid td > select:hover { border-color: var(--border); background: #fff; }
+table.grid td > input:focus, table.grid td > select:focus { background: var(--focus); border-color: var(--accent); outline: none; }
+table.grid td > input.code { font-family: var(--mono); }
+table.grid td > input.num { text-align: right; font-family: var(--mono); }
+
 .scroll-x { overflow-x: auto; }
 .sticky-head thead th { position: sticky; top: 0; z-index: 2; }
 .compact td, .compact th { padding: 1px 5px; font-size: 12px; }

@@ -148,6 +148,12 @@ def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(_db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # 起動後に DB ファイルが差し替えられた場合 (バックアップからの復元など) でも
+    # 「no such table」で落ちないよう、テーブルの有無を毎回確認する。
+    # sqlite_master の 1 行検索なので負荷は無視できる。
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='clients'").fetchone() is None:
+        conn.executescript(SCHEMA)
+        conn.commit()
     return conn
 
 
