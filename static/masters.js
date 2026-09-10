@@ -45,6 +45,7 @@ routes.accounts = async function (main) {
     <button id="a-add">行を追加</button>
     <button id="a-renumber" title="表示区分とコード順に並び順を振り直します">並び順を整理</button>
     <span style="flex:1"></span>
+    <button id="a-chart">科目表を入れ替える</button>
     <button id="a-import">CSV 取込</button>
     <button id="a-copy">他の顧問先から複写</button>
     <a class="btn" href="/api/clients/${S.client.id}/export/accounts.csv">CSV 出力</a>
@@ -295,6 +296,46 @@ routes.accounts = async function (main) {
       },
     });
   }
+
+  // ------------------------------------------------- 用意された科目表を適用
+  $('#a-chart').onclick = () => {
+    const charts = (S.meta.charts || []).filter(c => c.code !== 'none');
+    modal(`<h3>科目表を入れ替える</h3>
+      <p class="muted" style="margin-top:0">既にある顧問先に、用意された科目表を後から適用します。
+      コードが一致する科目は名称などが上書きされるだけなので、入力済みの仕訳は失われません。</p>
+      <div class="form">
+        <label class="field wide"><span>適用する科目表</span>
+          <select id="chart-chart">${charts.map(c => `<option value="${c.code}">${esc(c.name)}</option>`).join('')}</select></label>
+        <label class="field wide"><span>適用方法</span>
+          <select id="chart-mode">
+            <option value="merge">追加・更新のみ (今ある科目はそのまま残す)</option>
+            <option value="replace">入れ替える (科目表に無い既存科目は削除または無効化)</option>
+          </select></label>
+      </div>
+      <div id="chart-result" style="margin-top:10px"></div>
+      <div class="actions"><button data-close>キャンセル</button><button class="primary" id="chart-run">適用</button></div>`, {
+      onOpen(bg, close) {
+        $('#chart-run', bg).onclick = async () => {
+          const chart = $('#chart-chart', bg).value;
+          const mode = $('#chart-mode', bg).value;
+          const label = (charts.find(c => c.code === chart) || {}).name || chart;
+          const msg = mode === 'replace'
+            ? `「${label}」で科目表を入れ替えます。科目表に無い既存科目は削除され、仕訳で使用中のものは無効化されます。よろしいですか？`
+            : `「${label}」の科目を追加・更新します。よろしいですか？`;
+          if (!(await confirmDialog(msg))) return;
+          try {
+            const r = await POST(`/api/clients/${S.client.id}/accounts/apply-chart?chart=${chart}&mode=${mode}`);
+            await loadAccounts();
+            rows = snapshot();
+            clearDirty();
+            draw();
+            close();
+            toast(`適用しました (追加 ${r.created} / 更新 ${r.updated} / 削除 ${r.deleted} / 無効化 ${r.deactivated})`);
+          } catch (e) { showError(e); }
+        };
+      },
+    });
+  };
 
   // ---------------------------------------------------------------- CSV 取込
   $('#a-import').onclick = () => {

@@ -535,3 +535,41 @@ def test_invalid_chart_is_rejected(client):
     r = client.post("/api/clients", json={"code": "900", "name": "X", "entity_type": "corp",
                                           "tax_method": "inclusive", "fiscal_start_month": 4, "chart": "ありえない"})
     assert r.status_code == 400
+
+
+def test_apply_chart_to_existing_client(client):
+    """既存の顧問先に後から TKC 科目表を適用しても、入力済みの仕訳が残ること。"""
+    cl, fy, acc = make_client(client, tax_method="exclusive", chart="standard")
+    cid, d = cl["id"], fy["start_date"]
+    client.post(f"/api/clients/{cid}/entries", json={"entry_date": d, "lines": [
+        {"debit_account_id": acc["100"]["id"], "credit_account_id": acc["500"]["id"],
+         "amount": 110000, "tax_class": "11", "description": "現金売上"}]}).raise_for_status()
+
+    # merge: 既存科目は残したまま TKC の科目を足す
+    r = client.post(f"/api/clients/{cid}/accounts/apply-chart", params={"chart": "tkc", "mode": "merge"})
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] == 0 and r.json()["deactivated"] == 0
+    after = {a["code"]: a for a in client.get(f"/api/clients/{cid}/accounts").json()}
+    assert "100" in after and "1111" in after          # 旧科目も TKC 科目も居る
+    assert after["100"]["id"] == acc["100"]["id"]      # ID は変わらない
+
+    # replace: TKC に無い旧科目は削除、使用中のものは無効化
+    r = client.post(f"/api/clients/{cid}/accounts/apply-chart", params={"chart": "tkc", "mode": "replace"})
+    assert r.status_code == 200, r.text
+    after = {a["code"]: a for a in client.get(f"/api/clients/{cid}/accounts").json()}
+    assert "1111" in after and after["1111"]["active"] == 1
+    assert after["100"]["active"] == 0 and after["500"]["active"] == 0   # 仕訳で使用中 → 無効化
+    assert "101" not in after                                           # 未使用 → 削除
+
+    # 仕訳はそのまま残っている
+    entries = client.get(f"/api/clients/{cid}/entries").json()
+    assert entries["total"] == 1
+    line = entries["entries"][0]["lines"][0]
+    assert line["debit_code"] == "100" and line["description"] == "現金売上"
+    tb = client.get(f"/api/fiscal-years/{fy['id']}/reports/trial-balance").json()
+    rows = {x["code"]: x for x in tb["rows"]}
+    assert rows["100"]["closing_n"] == 110000
+    assert sum(x["debit"] for x in tb["rows"]) == sum(x["credit"] for x in tb["rows"])
+
+    assert client.post(f"/api/clients/{cid}/accounts/apply-chart", params={"chart": "none"}).status_code == 400
+    assert client.post(f"/api/clients/{cid}/accounts/apply-chart", params={"mode": "xx"}).status_code == 400

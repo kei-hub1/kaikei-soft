@@ -6,8 +6,8 @@ from pydantic import BaseModel, Field
 
 from ..db import db, rows_to_dicts
 from ..master_data import (
-    CHARTS, GROUPS, GROUP_MAP, PROVISIONAL_PREFIX, ROLE_CODES, ROLES,
-    TAX_CLASSES, TAX_CLASS_MAP, TKC_TAX_DIVISIONS,
+    CHART_CODES, CHARTS, GROUPS, GROUP_MAP, PROVISIONAL_PREFIX, ROLE_CODES, ROLES,
+    TAX_CLASSES, TAX_CLASS_MAP, TKC_TAX_DIVISIONS, chart_accounts,
 )
 
 router = APIRouter(prefix="/api", tags=["masters"])
@@ -193,12 +193,84 @@ def save_accounts_bulk(client_id: int, body: AccountsBulkIn):
 # 補助科目
 # ---------------------------------------------------------------------------
 
+def _apply_account_rows(conn, client_id: int, rows: list[dict], mode: str) -> dict:
+    """科目リストを顧問先に反映する。copy-from と apply-chart の共通処理。
+
+    コードが一致する既存科目は上書きし、無いものは追加する。mode="replace" の
+    場合、リストに無い既存科目は削除 (仕訳で使用中なら無効化) する。
+    戻り値の id_map は 元の科目コード -> 反映後の科目 ID。
+    """
+    dst = {r["code"]: dict(r) for r in conn.execute(
+        "SELECT * FROM accounts WHERE client_id=?", (client_id,)).fetchall()}
+    codes = {a["code"] for a in rows}
+    created = updated = deleted = deactivated = 0
+    id_map: dict[str, int] = {}
+    for a in rows:
+        cur = dst.get(a["code"])
+        values = (a["name"], a["kana"], a["category"], a["grp"], a["default_tax_class"],
+                  a["role"], a["sort_order"], int(a.get("active", 1)))
+        if cur:
+            conn.execute(
+                "UPDATE accounts SET name=?,kana=?,category=?,grp=?,default_tax_class=?,role=?,sort_order=?,active=? WHERE id=?",
+                values + (cur["id"],))
+            id_map[a["code"]] = cur["id"]
+            updated += 1
+        else:
+            c = conn.execute(
+                "INSERT INTO accounts(name,kana,category,grp,default_tax_class,role,sort_order,active,client_id,code) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)", values + (client_id, a["code"]))
+            id_map[a["code"]] = c.lastrowid
+            created += 1
+
+    left_over = []
+    if mode == "replace":
+        for code, a in dst.items():
+            if code in codes:
+                continue
+            used = conn.execute(
+                "SELECT COUNT(*) FROM journal_lines WHERE debit_account_id=? OR credit_account_id=?",
+                (a["id"], a["id"])).fetchone()[0]
+            if used:
+                conn.execute("UPDATE accounts SET active=0 WHERE id=?", (a["id"],))
+                deactivated += 1
+                left_over.append(f'{a["code"]} {a["name"]}')
+            else:
+                conn.execute("DELETE FROM opening_balances WHERE account_id=?", (a["id"],))
+                conn.execute("DELETE FROM accounts WHERE id=?", (a["id"],))
+                deleted += 1
+    return {"created": created, "updated": updated, "deleted": deleted,
+            "deactivated": deactivated, "deactivated_names": left_over[:20], "id_map": id_map}
+
+
+@router.post("/clients/{client_id}/accounts/apply-chart")
+def apply_chart(client_id: int, chart: str = "tkc", mode: str = "merge"):
+    """既存の顧問先に、用意された科目表 (TKC / 汎用) を後から適用する。
+
+    顧問先を作り直さずに科目体系を切り替えるための機能。仕訳は科目 ID で
+    結び付いているため、コードが一致する科目は ID を保ったまま名称等だけ
+    更新され、過去の入力は失われない。
+    """
+    if chart not in CHART_CODES or chart == "none":
+        raise HTTPException(400, "科目表の指定が不正です")
+    if mode not in ("merge", "replace"):
+        raise HTTPException(400, "mode は merge / replace のいずれか")
+    with db() as conn:
+        client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+        if not client:
+            raise HTTPException(404, "顧問先が見つかりません")
+        rows = chart_accounts(chart, client["entity_type"])
+        result = _apply_account_rows(conn, client_id, rows, mode)
+        result.pop("id_map")
+        result["chart"] = chart
+        return result
+
+
 @router.post("/clients/{client_id}/accounts/copy-from/{source_id}")
 def copy_accounts_from(client_id: int, source_id: int, mode: str = "merge", with_subs: bool = False):
     """他の顧問先の科目表を複写する。事務所共通の科目表を使い回すための機能。
 
     mode="merge"   : コードが一致する科目は上書きし、無いものは追加する。
-    mode="replace" : 上記に加え、複写元に無い科目を無効化する (仕訳未使用なら削除)。
+    mode="replace" : 上記に加え、複写元に無い科目を削除 (仕訳で使用中なら無効化) する。
     """
     if mode not in ("merge", "replace"):
         raise HTTPException(400, "mode は merge / replace のいずれか")
@@ -212,50 +284,15 @@ def copy_accounts_from(client_id: int, source_id: int, mode: str = "merge", with
             "SELECT * FROM accounts WHERE client_id=? ORDER BY sort_order, code", (source_id,)).fetchall()]
         if not src:
             raise HTTPException(400, "複写元に勘定科目がありません")
-        dst = {r["code"]: dict(r) for r in conn.execute(
-            "SELECT * FROM accounts WHERE client_id=?", (client_id,)).fetchall()}
-        src_codes = {a["code"] for a in src}
-
-        created = updated = deleted = deactivated = 0
-        id_map: dict[int, int] = {}
-        for a in src:
-            cur = dst.get(a["code"])
-            values = (a["name"], a["kana"], a["category"], a["grp"], a["default_tax_class"], a["role"],
-                      a["sort_order"], a["active"])
-            if cur:
-                conn.execute(
-                    "UPDATE accounts SET name=?,kana=?,category=?,grp=?,default_tax_class=?,role=?,sort_order=?,active=? WHERE id=?",
-                    values + (cur["id"],))
-                id_map[a["id"]] = cur["id"]
-                updated += 1
-            else:
-                c = conn.execute(
-                    "INSERT INTO accounts(name,kana,category,grp,default_tax_class,role,sort_order,active,client_id,code) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?)", values + (client_id, a["code"]))
-                id_map[a["id"]] = c.lastrowid
-                created += 1
-
-        if mode == "replace":
-            for code, a in dst.items():
-                if code in src_codes:
-                    continue
-                used = conn.execute(
-                    "SELECT COUNT(*) FROM journal_lines WHERE debit_account_id=? OR credit_account_id=?",
-                    (a["id"], a["id"])).fetchone()[0]
-                if used:
-                    conn.execute("UPDATE accounts SET active=0 WHERE id=?", (a["id"],))
-                    deactivated += 1
-                else:
-                    conn.execute("DELETE FROM opening_balances WHERE account_id=?", (a["id"],))
-                    conn.execute("DELETE FROM accounts WHERE id=?", (a["id"],))
-                    deleted += 1
+        result = _apply_account_rows(conn, client_id, src, mode)
+        id_map = result.pop("id_map")
 
         subs = 0
         if with_subs:
             for s in conn.execute(
-                "SELECT s.* FROM sub_accounts s JOIN accounts a ON a.id=s.account_id WHERE a.client_id=?",
-                (source_id,)).fetchall():
-                target = id_map.get(s["account_id"])
+                "SELECT s.*, a.code AS account_code FROM sub_accounts s JOIN accounts a ON a.id=s.account_id "
+                "WHERE a.client_id=?", (source_id,)).fetchall():
+                target = id_map.get(s["account_code"])
                 if target is None:
                     continue
                 if conn.execute("SELECT 1 FROM sub_accounts WHERE account_id=? AND code=?",
@@ -264,8 +301,8 @@ def copy_accounts_from(client_id: int, source_id: int, mode: str = "merge", with
                 conn.execute("INSERT INTO sub_accounts(account_id,code,name,kana,active) VALUES(?,?,?,?,?)",
                              (target, s["code"], s["name"], s["kana"], s["active"]))
                 subs += 1
-        return {"created": created, "updated": updated, "deleted": deleted,
-                "deactivated": deactivated, "sub_accounts": subs}
+        result["sub_accounts"] = subs
+        return result
 
 
 class SubAccountIn(BaseModel):
