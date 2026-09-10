@@ -1,3 +1,6 @@
+# 実行に必要な最小限のライブラリ。
+# uvicorn は [standard] を付けない。付けると httptools / watchfiles など C 拡張を含む
+# パッケージが入り、新しい Python では配布済みの wheel が無くビルドに失敗することがある。
 fastapi>=0.110
-uvicorn[standard]>=0.29
+uvicorn>=0.29
 python-multipart>=0.0.9
