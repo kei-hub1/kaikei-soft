@@ -58,6 +58,23 @@ KAIKEI_DB=D:\kaikei\office.db python run.py   # DB ファイルの場所を変�
 内部では、スタートアップフォルダーに `ZaimuEntry-Server.lnk` を作成し、
 `start-background.vbs` 経由で `start.bat --no-browser` を最小化起動しています。
 管理者権限は不要で、変更はサインイン中のユーザーの範囲に限られます。
+`start-background.vbs` が無い場合は `autostart-on.bat` が自動生成します。
+
+### バッチファイルの文字コード (保守上の注意)
+
+`*.bat` は **Shift_JIS (CP932) + CRLF** で保存すること。UTF-8 にすると、
+cmd.exe が全角文字の途中で行を分断し、次のような誤動作が起きる。
+
+```
+'ドし直してください。' is not recognized as an internal or external command
+```
+
+同じ理由から、日本語のメッセージを `if ... ( ... )` のブロック内に置かない。
+分岐はラベルと `goto` で書く。`.gitattributes` で `*.bat -text` を指定し、
+Git が改行や文字コードを変換しないようにしている。
+
+`start-background.vbs` は ASCII のみで記述する。`wscript` は `.vbs` を
+システムのコードページで読むため、非 ASCII 文字は文字化けする。
 
 ## 最初の使い方
 

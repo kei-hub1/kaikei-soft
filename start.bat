@@ -2,73 +2,72 @@
 rem ============================================================
 rem  Zaimu Entry (kaikei-soft) launcher for Windows
 rem  Double-click this file to start the application.
+rem
+rem  IMPORTANT: this file must stay in Shift_JIS (CP932).
+rem  cmd.exe mis-parses multibyte characters in UTF-8 batch files and can
+rem  split a line in the middle of a character, so never save it as UTF-8.
+rem  For the same reason, no Japanese text is placed inside ( ) blocks.
 rem ============================================================
-chcp 65001 >nul
+chcp 932 >nul 2>nul
 setlocal
 cd /d "%~dp0"
 
-rem --- Python ã‚’æŽ¢ã™ ---------------------------------------------------------
-rem py ãƒ©ãƒ³ãƒãƒ£ãƒ¼ã¯ PATH ã®è¨­å®šã«é–¢ä¿‚ãªãä½¿ãˆã‚‹ã®ã§æœ€å„ªå…ˆã§è©¦ã™ã€‚
+rem --- Python ‚ð’T‚· (py ƒ‰ƒ“ƒ`ƒƒ[‚Í PATH Ý’è‚ÉŠÖŒW‚È‚­Žg‚¦‚é‚Ì‚Å—Dæ) ---
 set "PY="
 py -3 -c "import sys" >nul 2>nul
 if not errorlevel 1 set "PY=py -3"
-if not defined PY (
-  python -c "import sys" >nul 2>nul
-  if not errorlevel 1 set "PY=python"
-)
+if defined PY goto :found
+python -c "import sys" >nul 2>nul
+if not errorlevel 1 set "PY=python"
+if defined PY goto :found
+goto :no_python
 
-if not defined PY (
-  echo.
-  echo   Python ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“ã§ã—ãŸã€‚
-  echo.
-  echo   https://www.python.org/downloads/windows/ ã‹ã‚‰ã‚¤ãƒ³ã‚¹ãƒˆãƒ¼ãƒ©ãƒ¼ã‚’å…¥æ‰‹ã—ã€
-  echo   æœ€åˆã®ç”»é¢ã®ä¸‹ã«ã‚ã‚‹ "Add python.exe to PATH" ã«ãƒã‚§ãƒƒã‚¯ã‚’å…¥ã‚Œã¦ã‹ã‚‰
-  echo   "Install Now" ã‚’æŠ¼ã—ã¦ãã ã•ã„ã€‚
-  echo.
-  echo   ã‚¤ãƒ³ã‚¹ãƒˆãƒ¼ãƒ«ãŒçµ‚ã‚ã£ãŸã‚‰ã€ã“ã®ãƒ•ã‚¡ã‚¤ãƒ«ã‚’ã‚‚ã†ä¸€åº¦ãƒ€ãƒ–ãƒ«ã‚¯ãƒªãƒƒã‚¯ã—ã¦ãã ã•ã„ã€‚
-  echo.
-  pause
-  exit /b 1
-)
-
+:found
 for /f "delims=" %%v in ('%PY% -c "import sys;print(sys.version.split()[0])" 2^>nul') do set "PYVER=%%v"
-echo   Python %PYVER% ã‚’ä½¿ç”¨ã—ã¾ã™ã€‚
+echo   Python %PYVER% ‚ðŽg—p‚µ‚Ü‚·B
 
-rem --- å¿…è¦ãªãƒ©ã‚¤ãƒ–ãƒ©ãƒªã‚’ç¢ºèª ------------------------------------------------
+rem --- •K—v‚Èƒ‰ƒCƒuƒ‰ƒŠ‚ðŠm”F ---
 %PY% -c "import fastapi, uvicorn, multipart" >nul 2>nul
-if errorlevel 1 (
-  echo.
-  echo   åˆå›žèµ·å‹•ã®ãŸã‚ã€å¿…è¦ãªãƒ©ã‚¤ãƒ–ãƒ©ãƒªã‚’ã‚¤ãƒ³ã‚¹ãƒˆãƒ¼ãƒ«ã—ã¾ã™ã€‚
-  echo   ã‚¤ãƒ³ã‚¿ãƒ¼ãƒãƒƒãƒˆã«æŽ¥ç¶šã—ãŸçŠ¶æ…‹ã§ã€æ•°åˆ†ãŠå¾…ã¡ãã ã•ã„ã€‚
-  echo.
-  %PY% -m pip install --upgrade pip >nul 2>nul
-  %PY% -m pip install -r requirements.txt
-  if errorlevel 1 (
-    echo.
-    echo   ãƒ©ã‚¤ãƒ–ãƒ©ãƒªã®ã‚¤ãƒ³ã‚¹ãƒˆãƒ¼ãƒ«ã«å¤±æ•—ã—ã¾ã—ãŸã€‚
-    echo   ä¸Šã«è¡¨ç¤ºã•ã‚Œã¦ã„ã‚‹ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã‚’æŽ§ãˆã¦ã€é–‹ç™ºè€…ã«é€£çµ¡ã—ã¦ãã ã•ã„ã€‚
-    echo.
-    pause
-    exit /b 1
-  )
-)
+if not errorlevel 1 goto :launch
 
-%PY% -c "import fastapi, uvicorn, multipart" >nul 2>nul
-if errorlevel 1 (
-  echo.
-  echo   ãƒ©ã‚¤ãƒ–ãƒ©ãƒªã‚’èª­ã¿è¾¼ã‚ã¾ã›ã‚“ã§ã—ãŸã€‚
-  echo.
-  pause
-  exit /b 1
-)
-
-rem --- èµ·å‹• ------------------------------------------------------------------
 echo.
-echo   è²¡å‹™ã‚¨ãƒ³ãƒˆãƒª ã‚’èµ·å‹•ã—ã¾ã™ã€‚ãƒ–ãƒ©ã‚¦ã‚¶ãŒè‡ªå‹•çš„ã«é–‹ãã¾ã™ã€‚
-echo   çµ‚äº†ã™ã‚‹ã¨ãã¯ã€ã“ã®ã‚¦ã‚£ãƒ³ãƒ‰ã‚¦ã§ Ctrl+C ã‚’æŠ¼ã™ã‹ã€ã‚¦ã‚£ãƒ³ãƒ‰ã‚¦ã‚’é–‰ã˜ã¦ãã ã•ã„ã€‚
+echo   ‰‰ñ‹N“®‚Ì‚½‚ßA•K—v‚Èƒ‰ƒCƒuƒ‰ƒŠ‚ðƒCƒ“ƒXƒg[ƒ‹‚µ‚Ü‚·B
+echo   ƒCƒ“ƒ^[ƒlƒbƒg‚ÉÚ‘±‚µ‚½ó‘Ô‚ÅA”•ª‚¨‘Ò‚¿‚­‚¾‚³‚¢B
+echo.
+%PY% -m pip install --upgrade pip >nul 2>nul
+%PY% -m pip install -r requirements.txt
+if errorlevel 1 goto :pip_failed
+%PY% -c "import fastapi, uvicorn, multipart" >nul 2>nul
+if errorlevel 1 goto :pip_failed
+
+:launch
+echo.
+echo   à–±ƒGƒ“ƒgƒŠ ‚ð‹N“®‚µ‚Ü‚·Bƒuƒ‰ƒEƒU‚ªŽ©“®“I‚ÉŠJ‚«‚Ü‚·B
+echo   I—¹‚·‚é‚Æ‚«‚ÍA‚±‚ÌƒEƒBƒ“ƒhƒE‚Å Ctrl+C ‚ð‰Ÿ‚·‚©AƒEƒBƒ“ƒhƒE‚ð•Â‚¶‚Ä‚­‚¾‚³‚¢B
 echo.
 %PY% run.py %*
 echo.
-echo   è²¡å‹™ã‚¨ãƒ³ãƒˆãƒª ã‚’çµ‚äº†ã—ã¾ã—ãŸã€‚
+echo   à–±ƒGƒ“ƒgƒŠ ‚ðI—¹‚µ‚Ü‚µ‚½B
 pause
-endlocal
+exit /b 0
+
+:no_python
+echo.
+echo   Python ‚ªŒ©‚Â‚©‚è‚Ü‚¹‚ñ‚Å‚µ‚½B
+echo.
+echo   https://www.python.org/downloads/windows/ ‚©‚çƒCƒ“ƒXƒg[ƒ‰[‚ð“üŽè‚µA
+echo   Å‰‚Ì‰æ–Ê‚Ì‰º‚É‚ ‚é "Add python.exe to PATH" ‚Éƒ`ƒFƒbƒN‚ð“ü‚ê‚Ä‚©‚ç
+echo   "Install Now" ‚ð‰Ÿ‚µ‚Ä‚­‚¾‚³‚¢B
+echo.
+echo   ƒCƒ“ƒXƒg[ƒ‹‚ªI‚í‚Á‚½‚çA‚±‚Ìƒtƒ@ƒCƒ‹‚ð‚à‚¤ˆê“xƒ_ƒuƒ‹ƒNƒŠƒbƒN‚µ‚Ä‚­‚¾‚³‚¢B
+echo.
+pause
+exit /b 1
+
+:pip_failed
+echo.
+echo   ƒ‰ƒCƒuƒ‰ƒŠ‚ÌƒCƒ“ƒXƒg[ƒ‹‚ÉŽ¸”s‚µ‚Ü‚µ‚½B
+echo   ã‚É•\Ž¦‚³‚ê‚Ä‚¢‚éƒƒbƒZ[ƒW‚ðT‚¦‚ÄAŠJ”­ŽÒ‚É˜A—‚µ‚Ä‚­‚¾‚³‚¢B
+echo.
+pause
+exit /b 1

@@ -2,28 +2,30 @@
 rem ============================================================
 rem  Zaimu Entry (kaikei-soft)
 rem  Remove the Windows logon auto-start entry and the desktop shortcut.
+rem
+rem  IMPORTANT: this file must stay in Shift_JIS (CP932). See start.bat.
 rem ============================================================
-chcp 65001 >nul
+chcp 932 >nul 2>nul
 setlocal
 
 echo.
-echo   è‡ªå‹•èµ·å‹•ã®è¨­å®šã‚’è§£é™¤ã—ã¦ã„ã¾ã™...
+echo   ©“®‹N“®‚Ìİ’è‚ğ‰ğœ‚µ‚Ä‚¢‚Ü‚·...
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $sp=[Environment]::GetFolderPath('Startup'); Remove-Item -LiteralPath (Join-Path $sp 'ZaimuEntry-Server.lnk') -Force -ErrorAction SilentlyContinue; $d=[Environment]::GetFolderPath('Desktop'); $n=(-join ([char]0x8CA1,[char]0x52D9,[char]0x30A8,[char]0x30F3,[char]0x30C8,[char]0x30EA)); Remove-Item -LiteralPath (Join-Path $d ($n+'.url')) -Force -ErrorAction SilentlyContinue; exit 0 } catch { Write-Output $_.Exception.Message; exit 1 }"
+if errorlevel 1 goto :failed
 
-if errorlevel 1 (
-  echo.
-  echo   è§£é™¤ã«å¤±æ•—ã—ã¾ã—ãŸã€‚
-  echo   ä¸Šã«è¡¨ç¤ºã•ã‚Œã¦ã„ã‚‹ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã‚’æ§ãˆã¦ã€é–‹ç™ºè€…ã«é€£çµ¡ã—ã¦ãã ã•ã„ã€‚
-  echo.
-  pause
-  exit /b 1
-)
-
-echo   è§£é™¤ã—ã¾ã—ãŸã€‚æ¬¡å› Windows ã‚’èµ·å‹•ã—ã¦ã‚‚è‡ªå‹•ã§ã¯ç«‹ã¡ä¸ŠãŒã‚Šã¾ã›ã‚“ã€‚
+echo   ‰ğœ‚µ‚Ü‚µ‚½BŸ‰ñ Windows ‚ğ‹N“®‚µ‚Ä‚à©“®‚Å‚Í—§‚¿ã‚ª‚è‚Ü‚¹‚ñB
 echo.
-echo   ã„ã¾å‹•ã„ã¦ã„ã‚‹ã‚½ãƒ•ãƒˆã‚’æ­¢ã‚ã‚‹ã«ã¯ã€ã‚¿ã‚¹ã‚¯ãƒãƒ¼ã«ã‚ã‚‹é»’ã„çª“ã‚’é–‹ã„ã¦
-echo   é–‰ã˜ã¦ãã ã•ã„ã€‚ä½¿ã„ãŸã„ã¨ãã¯ start.bat ã‚’ãƒ€ãƒ–ãƒ«ã‚¯ãƒªãƒƒã‚¯ã—ã¾ã™ã€‚
+echo   ‚¢‚Ü“®‚¢‚Ä‚¢‚éƒ\ƒtƒg‚ğ~‚ß‚é‚É‚ÍAƒ^ƒXƒNƒo[‚É‚ ‚é•‚¢‘‹‚ğŠJ‚¢‚Ä
+echo   •Â‚¶‚Ä‚­‚¾‚³‚¢Bg‚¢‚½‚¢‚Æ‚«‚Í start.bat ‚ğƒ_ƒuƒ‹ƒNƒŠƒbƒN‚µ‚Ü‚·B
 echo.
 pause
-endlocal
+exit /b 0
+
+:failed
+echo.
+echo   ‰ğœ‚É¸”s‚µ‚Ü‚µ‚½B
+echo   ã‚É•\¦‚³‚ê‚Ä‚¢‚éƒƒbƒZ[ƒW‚ğT‚¦‚ÄAŠJ”­Ò‚É˜A—‚µ‚Ä‚­‚¾‚³‚¢B
+echo.
+pause
+exit /b 1

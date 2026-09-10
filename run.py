@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import socket
 import threading
 import webbrowser
@@ -24,16 +25,19 @@ def main() -> None:
     p.add_argument("--reload", action="store_true", help="開発用: ソース変更時に自動再起動")
     args = p.parse_args()
 
+    # 自動起動 (start-background.vbs) からは引数が渡らない環境もあるため、
+    # 環境変数でもブラウザ抑止を指定できるようにしておく。
+    no_browser = args.no_browser or os.environ.get("KAIKEI_NO_BROWSER") == "1"
     url = f"http://{args.host}:{args.port}/"
 
     # 二重起動の場合はエラーにせず、動いている方をブラウザで開く。
     if is_running(args.host, args.port):
         print(f"財務エントリ はすでに起動しています: {url}")
-        if not args.no_browser:
+        if not no_browser:
             webbrowser.open(url)
         return
 
-    if not args.no_browser:
+    if not no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     print(f"財務エントリ を起動しました: {url}  (終了は Ctrl+C)")
     try:

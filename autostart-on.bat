@@ -3,72 +3,96 @@ rem ============================================================
 rem  Zaimu Entry (kaikei-soft)
 rem  Register the server to start automatically at Windows logon,
 rem  and put a shortcut to the app on the desktop.
+rem
+rem  IMPORTANT: this file must stay in Shift_JIS (CP932). See start.bat.
+rem  No Japanese text inside ( ) blocks: use labels and GOTO instead.
 rem ============================================================
-chcp 65001 >nul
+chcp 932 >nul 2>nul
 setlocal
 cd /d "%~dp0"
 set "APPDIR=%CD%"
+set "VBSFILE=%APPDIR%\start-background.vbs"
 
-if not exist "%APPDIR%\start.bat" (
-  echo.
-  echo   start.bat ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“ã€‚
-  echo   ã“ã®ãƒ•ã‚¡ã‚¤ãƒ«ã¯ start.bat ã¨åŒã˜ãƒ•ã‚©ãƒ«ãƒ€ã«ç½®ã„ã¦ãã ã•ã„ã€‚
-  echo.
-  pause
-  exit /b 1
-)
-if not exist "%APPDIR%\start-background.vbs" (
-  echo.
-  echo   start-background.vbs ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“ã€‚
-  echo   ãƒ•ã‚¡ã‚¤ãƒ«ä¸€å¼ã‚’ãƒ€ã‚¦ãƒ³ãƒ­ãƒ¼ãƒ‰ã—ç›´ã—ã¦ãã ã•ã„ã€‚
-  echo.
-  pause
-  exit /b 1
-)
+if not exist "%APPDIR%\start.bat" goto :no_files
+if not exist "%APPDIR%\run.py" goto :no_files
+if exist "%VBSFILE%" goto :register
 
+rem --- start-background.vbs ‚ª–³‚¯‚ê‚Îì‚é (“à—e‚Í ASCII ‚Ì‚İ) ---
 echo.
-echo   è‡ªå‹•èµ·å‹•ã‚’è¨­å®šã—ã¦ã„ã¾ã™...
+echo   ‹N“®—pƒtƒ@ƒCƒ‹ start-background.vbs ‚ğì¬‚µ‚Ü‚·B
+echo Set sh = CreateObject("WScript.Shell")> "%VBSFILE%"
+echo Set fso = CreateObject("Scripting.FileSystemObject")>> "%VBSFILE%"
+echo Set env = sh.Environment("PROCESS")>> "%VBSFILE%"
+echo env("KAIKEI_NO_BROWSER") = "1">> "%VBSFILE%"
+echo base = fso.GetParentFolderName(WScript.ScriptFullName)>> "%VBSFILE%"
+echo sh.CurrentDirectory = base>> "%VBSFILE%"
+echo sh.Run Chr(34) + base + "\start.bat" + Chr(34) + " --no-browser", 7, False>> "%VBSFILE%"
+if not exist "%VBSFILE%" goto :vbs_failed
 
-rem PowerShell å´ã¯ ASCII ã®ã¿ã§æ›¸ãã€æ–‡å­—åˆ—ã¯å…¨ã¦å˜ä¸€å¼•ç”¨ç¬¦ã‚’ä½¿ã†ã€‚
-rem äºŒé‡å¼•ç”¨ç¬¦ã‚„ãƒ‘ãƒ¼ã‚»ãƒ³ãƒˆè¨˜å·ã‚’æ··ãœã‚‹ã¨ãƒãƒƒãƒå´ã®è§£é‡ˆã§å£Šã‚Œã‚‹ãŸã‚ã€‚
+:register
+echo.
+echo   ©“®‹N“®‚ğİ’è‚µ‚Ä‚¢‚Ü‚·...
+
+rem PowerShell ‘¤‚Í ASCII ‚Ì‚İ‚Å‘‚«A•¶š—ñ‚Í‘S‚Ä’Pˆêˆø—p•„‚ğg‚¤B
+rem “ñdˆø—p•„‚âƒp[ƒZƒ“ƒg‹L†‚ğ¬‚º‚é‚Æƒoƒbƒ`‘¤‚Ì‰ğß‚Å‰ó‚ê‚é‚½‚ßB
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $q=[string][char]34; $W=New-Object -ComObject WScript.Shell; $sp=[Environment]::GetFolderPath('Startup'); $lnk=$W.CreateShortcut((Join-Path $sp 'ZaimuEntry-Server.lnk')); $lnk.TargetPath='wscript.exe'; $lnk.Arguments=$q+$env:APPDIR+'\start-background.vbs'+$q; $lnk.WorkingDirectory=$env:APPDIR; $lnk.WindowStyle=7; $lnk.Description='Zaimu Entry local server'; $lnk.Save(); $d=[Environment]::GetFolderPath('Desktop'); $n=(-join ([char]0x8CA1,[char]0x52D9,[char]0x30A8,[char]0x30F3,[char]0x30C8,[char]0x30EA)); Set-Content -LiteralPath (Join-Path $d ($n+'.url')) -Value @('[InternetShortcut]','URL=http://127.0.0.1:8765/') -Encoding ASCII; exit 0 } catch { Write-Output $_.Exception.Message; exit 1 }"
+if errorlevel 1 goto :ps_failed
 
-if errorlevel 1 (
-  echo.
-  echo   è¨­å®šã«å¤±æ•—ã—ã¾ã—ãŸã€‚
-  echo   ä¸Šã«è¡¨ç¤ºã•ã‚Œã¦ã„ã‚‹ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã‚’æ§ãˆã¦ã€é–‹ç™ºè€…ã«é€£çµ¡ã—ã¦ãã ã•ã„ã€‚
-  echo.
-  pause
-  exit /b 1
-)
+echo   İ’è‚ªŠ®—¹‚µ‚Ü‚µ‚½B
+echo.
+echo     * Ÿ‰ñ Windows ‚ğ‹N“®‚µ‚½‚Æ‚«‚©‚çAà–±ƒGƒ“ƒgƒŠ ‚ª©“®‚Å—§‚¿ã‚ª‚è‚Ü‚·B
+echo     * ƒfƒXƒNƒgƒbƒv‚Éuà–±ƒGƒ“ƒgƒŠv‚ÌƒVƒ‡[ƒgƒJƒbƒg‚ğì¬‚µ‚Ü‚µ‚½B
+echo       ƒ_ƒuƒ‹ƒNƒŠƒbƒN‚·‚é‚Æƒuƒ‰ƒEƒU‚ÅŠJ‚¯‚Ü‚·B
+echo     * •‚¢‘‹‚ÍÅ¬‰»‚³‚ê‚½ó‘Ô‚Å‘Ò‹@‚µ‚Ü‚·B•Â‚¶‚é‚Æƒ\ƒtƒg‚à~‚Ü‚è‚Ü‚·B
+echo.
+echo   ©“®‹N“®‚ğ‚â‚ß‚½‚¢‚Æ‚«‚Í autostart-off.bat ‚ğÀs‚µ‚Ä‚­‚¾‚³‚¢B
+echo.
+echo   ‚¢‚Üg‚¦‚é‚æ‚¤‚ÉAà–±ƒGƒ“ƒgƒŠ ‚ğ‹N“®‚µ‚Ü‚·B‚µ‚Î‚ç‚­‚¨‘Ò‚¿‚­‚¾‚³‚¢...
 
-echo   è¨­å®šãŒå®Œäº†ã—ã¾ã—ãŸã€‚
-echo.
-echo     ãƒ»æ¬¡å› Windows ã‚’èµ·å‹•ã—ãŸã¨ãã‹ã‚‰ã€è²¡å‹™ã‚¨ãƒ³ãƒˆãƒª ãŒè‡ªå‹•ã§ç«‹ã¡ä¸ŠãŒã‚Šã¾ã™ã€‚
-echo     ãƒ»ãƒ‡ã‚¹ã‚¯ãƒˆãƒƒãƒ—ã«ã€Œè²¡å‹™ã‚¨ãƒ³ãƒˆãƒªã€ã®ã‚·ãƒ§ãƒ¼ãƒˆã‚«ãƒƒãƒˆã‚’ä½œæˆã—ã¾ã—ãŸã€‚
-echo       ãƒ€ãƒ–ãƒ«ã‚¯ãƒªãƒƒã‚¯ã™ã‚‹ã¨ãƒ–ãƒ©ã‚¦ã‚¶ã§é–‹ã‘ã¾ã™ã€‚
-echo     ãƒ»é»’ã„çª“ã¯æœ€å°åŒ–ã•ã‚ŒãŸçŠ¶æ…‹ã§å¾…æ©Ÿã—ã¾ã™ã€‚é–‰ã˜ã‚‹ã¨ã‚½ãƒ•ãƒˆã‚‚æ­¢ã¾ã‚Šã¾ã™ã€‚
-echo.
-echo   è‡ªå‹•èµ·å‹•ã‚’ã‚„ã‚ãŸã„ã¨ãã¯ autostart-off.bat ã‚’å®Ÿè¡Œã—ã¦ãã ã•ã„ã€‚
-echo.
-echo   ã„ã¾ä½¿ãˆã‚‹ã‚ˆã†ã«ã€è²¡å‹™ã‚¨ãƒ³ãƒˆãƒª ã‚’èµ·å‹•ã—ã¾ã™ã€‚ã—ã°ã‚‰ããŠå¾…ã¡ãã ã•ã„...
-
-start "" wscript.exe "%APPDIR%\start-background.vbs"
+start "" wscript.exe "%VBSFILE%"
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$n=0; while ($n -lt 90) { try { $c=New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',8765); $c.Close(); exit 0 } catch { Start-Sleep -Seconds 1; $n++ } }; exit 1"
-
-if errorlevel 1 (
-  echo.
-  echo   æ™‚é–“å†…ã«èµ·å‹•ã‚’ç¢ºèªã§ãã¾ã›ã‚“ã§ã—ãŸã€‚
-  echo   ã‚¿ã‚¹ã‚¯ãƒãƒ¼ã®é»’ã„çª“ã‚’é–‹ã„ã¦ã€è¡¨ç¤ºã•ã‚Œã¦ã„ã‚‹ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã‚’ç¢ºèªã—ã¦ãã ã•ã„ã€‚
-  echo.
-  pause
-  exit /b 1
-)
+if errorlevel 1 goto :slow
 
 start "" "http://127.0.0.1:8765/"
 echo.
-echo   èµ·å‹•ã—ã¾ã—ãŸã€‚ãƒ–ãƒ©ã‚¦ã‚¶ãŒé–‹ã‹ãªã„å ´åˆã¯ã€ãƒ‡ã‚¹ã‚¯ãƒˆãƒƒãƒ—ã®ã‚·ãƒ§ãƒ¼ãƒˆã‚«ãƒƒãƒˆã‚’ä½¿ã£ã¦ãã ã•ã„ã€‚
+echo   ‹N“®‚µ‚Ü‚µ‚½Bƒuƒ‰ƒEƒU‚ªŠJ‚©‚È‚¢ê‡‚ÍAƒfƒXƒNƒgƒbƒv‚ÌƒVƒ‡[ƒgƒJƒbƒg‚ğg‚Á‚Ä‚­‚¾‚³‚¢B
 echo.
 pause
-endlocal
+exit /b 0
+
+:no_files
+echo.
+echo   start.bat ‚Ü‚½‚Í run.py ‚ªŒ©‚Â‚©‚è‚Ü‚¹‚ñB
+echo   ‚±‚Ìƒtƒ@ƒCƒ‹‚Í start.bat ‚Æ“¯‚¶ƒtƒHƒ‹ƒ_‚É’u‚¢‚Ä‚­‚¾‚³‚¢B
+echo.
+echo   Œ»İ‚ÌƒtƒHƒ‹ƒ_:
+echo   %APPDIR%
+echo.
+pause
+exit /b 1
+
+:vbs_failed
+echo.
+echo   start-background.vbs ‚ğì¬‚Å‚«‚Ü‚¹‚ñ‚Å‚µ‚½B
+echo   ƒtƒHƒ‹ƒ_‚Ì‘‚«‚İŒ ŒÀ‚ğŠm”F‚µ‚Ä‚­‚¾‚³‚¢B
+echo.
+pause
+exit /b 1
+
+:ps_failed
+echo.
+echo   İ’è‚É¸”s‚µ‚Ü‚µ‚½B
+echo   ã‚É•\¦‚³‚ê‚Ä‚¢‚éƒƒbƒZ[ƒW‚ğT‚¦‚ÄAŠJ”­Ò‚É˜A—‚µ‚Ä‚­‚¾‚³‚¢B
+echo.
+pause
+exit /b 1
+
+:slow
+echo.
+echo   ŠÔ“à‚É‹N“®‚ğŠm”F‚Å‚«‚Ü‚¹‚ñ‚Å‚µ‚½B
+echo   ƒ^ƒXƒNƒo[‚Ì•‚¢‘‹‚ğŠJ‚¢‚ÄA•\¦‚³‚ê‚Ä‚¢‚éƒƒbƒZ[ƒW‚ğŠm”F‚µ‚Ä‚­‚¾‚³‚¢B
+echo   ©“®‹N“®‚Ìİ’è‚»‚Ì‚à‚Ì‚ÍŠ®—¹‚µ‚Ä‚¢‚Ü‚·B
+echo.
+pause
+exit /b 1
