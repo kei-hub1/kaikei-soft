@@ -5,7 +5,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..db import db, rows_to_dicts
-from ..master_data import GROUPS, GROUP_MAP, ROLE_CODES, ROLES, TAX_CLASSES, TAX_CLASS_MAP
+from ..master_data import (
+    CHARTS, GROUPS, GROUP_MAP, PROVISIONAL_PREFIX, ROLE_CODES, ROLES,
+    TAX_CLASSES, TAX_CLASS_MAP, TKC_TAX_DIVISIONS,
+)
 
 router = APIRouter(prefix="/api", tags=["masters"])
 
@@ -16,6 +19,9 @@ def meta():
         "tax_classes": TAX_CLASSES,
         "groups": GROUPS,
         "roles": ROLES,
+        "charts": CHARTS,
+        "tkc_tax_divisions": TKC_TAX_DIVISIONS,
+        "provisional_prefix": PROVISIONAL_PREFIX,
         "entity_types": [{"code": "corp", "name": "法人"}, {"code": "sole", "name": "個人"}],
         "tax_methods": [
             {"code": "inclusive", "name": "税込経理"},

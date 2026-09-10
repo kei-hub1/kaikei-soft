@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..db import db, now_iso, rows_to_dicts
-from ..master_data import standard_accounts_for
+from ..master_data import CHART_CODES, chart_accounts
 from ..posting import trial_balance
 
 router = APIRouter(prefix="/api", tags=["clients"])
@@ -21,8 +21,8 @@ class ClientIn(BaseModel):
     tax_method: str = "inclusive"
     fiscal_start_month: int = Field(default=4, ge=1, le=12)
     note: str = ""
-    # 新規作成時のみ有効。False の場合は科目を空で作り、CSV 取込で自前の科目表を入れる。
-    copy_standard_accounts: bool = True
+    # 新規作成時のみ有効。どの科目表を複写するか (tkc / standard / none)。
+    chart: str = "tkc"
 
 
 class FiscalYearIn(BaseModel):
@@ -36,6 +36,8 @@ def _validate_client(c: ClientIn) -> None:
         raise HTTPException(400, "entity_type は corp / sole のいずれか")
     if c.tax_method not in ("inclusive", "exclusive", "exempt"):
         raise HTTPException(400, "tax_method は inclusive / exclusive / exempt のいずれか")
+    if c.chart not in CHART_CODES:
+        raise HTTPException(400, "科目表の指定が不正です")
 
 
 def _fy_label(start: str, end: str) -> str:
@@ -72,13 +74,12 @@ def create_client(c: ClientIn):
             (c.code, c.name, c.kana, c.entity_type, c.tax_method, c.fiscal_start_month, c.note, now_iso()),
         )
         cid = cur.lastrowid
-        # 標準勘定科目を複写 (科目表を CSV で入れる場合は複写しない)
-        if c.copy_standard_accounts:
-            conn.executemany(
-                "INSERT INTO accounts(client_id,code,name,kana,category,grp,default_tax_class,role,sort_order) VALUES(?,?,?,?,?,?,?,?,?)",
-                [(cid, a["code"], a["name"], a["kana"], a["category"], a["grp"], a["default_tax_class"], a["role"], a["sort_order"])
-                 for a in standard_accounts_for(c.entity_type)],
-            )
+        # 選択された科目表を複写する
+        conn.executemany(
+            "INSERT INTO accounts(client_id,code,name,kana,category,grp,default_tax_class,role,sort_order) VALUES(?,?,?,?,?,?,?,?,?)",
+            [(cid, a["code"], a["name"], a["kana"], a["category"], a["grp"], a["default_tax_class"], a["role"], a["sort_order"])
+             for a in chart_accounts(c.chart, c.entity_type)],
+        )
         # 初期会計期間
         s, e = _default_fy(c.fiscal_start_month, c.entity_type)
         conn.execute("INSERT INTO fiscal_years(client_id,start_date,end_date,label) VALUES(?,?,?,?)",

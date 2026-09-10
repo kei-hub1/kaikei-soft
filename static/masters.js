@@ -50,6 +50,7 @@ routes.accounts = async function (main) {
     <a class="btn" href="/api/clients/${S.client.id}/export/accounts.csv">CSV 出力</a>
     <button id="a-save" class="primary">変更を保存</button>
   </div>
+  <div id="a-todo"></div>
   <div class="panel" style="padding-top:6px">
     <div class="row between" style="margin-bottom:4px">
       <span class="muted">コード・科目名はそのまま書き換えられます。仕訳は科目 ID で結び付いているため、コードを変えても過去の入力は失われません。</span>
@@ -120,6 +121,34 @@ routes.accounts = async function (main) {
     }
     $('#a-status').innerHTML = dirty ? '<span class="badge warn">未保存の変更があります</span>'
       : `<span class="muted">${rows.length} 科目</span>`;
+    drawTodo();
+  }
+
+  /** コードが未確認の暫定科目と、不足している役割を知らせる。 */
+  function drawTodo() {
+    const prefix = S.meta.provisional_prefix || 'Z';
+    const prov = rows.filter(r => String(r.code).startsWith(prefix));
+    const roles = new Set(rows.filter(r => r.active).map(r => r.role).filter(Boolean));
+    const missing = [];
+    if (S.client.tax_method === 'exclusive') {
+      for (const c of ['tax_receivable', 'tax_payable']) if (!roles.has(c)) missing.push(c);
+    }
+    missing.push(...(S.client.entity_type === 'sole' ? ['owner_capital'] : ['retained']).filter(c => !roles.has(c)));
+    const roleName = (c) => ((S.meta.roles || []).find(r => r.code === c) || {}).name || c;
+
+    const parts = [];
+    if (prov.length) {
+      parts.push(`<div><b>コードが未確認の科目が ${prov.length} 件あります。</b>
+        TKC のコードが分かり次第、下の一覧でコードと科目名を書き換えてください。<br>
+        ${prov.map(r => `<span class="mono">${esc(r.code)}</span> ${esc(r.name)}`).join(' / ')}</div>`);
+    }
+    if (missing.length) {
+      parts.push(`<div><b>役割が設定されていない科目があります。</b>
+        ${missing.map(c => esc(roleName(c))).join('、')} の役割を持つ科目が必要です。
+        該当する科目の「役割」欄で選んでください。</div>`);
+    }
+    $('#a-todo').innerHTML = parts.length
+      ? `<div class="panel" style="border-color:#f59e0b;background:var(--warn-bg)">${parts.join('<div style="height:6px"></div>')}</div>` : '';
   }
 
   $('#a-table').addEventListener('input', (e) => {
@@ -544,11 +573,11 @@ routes.clients = async function (main) {
       field('消費税の経理方式', selectInput('tax_method', S.meta.tax_methods.map(x => ({ value: x.code, label: x.name })), c.tax_method)) +
       field('期首月 (法人)', selectInput('fiscal_start_month', Array.from({ length: 12 }, (_, i) => ({ value: i + 1, label: `${i + 1}月` })), c.fiscal_start_month)) +
       field('備考', textInput('note', c.note), true) +
-      (isNew ? field('標準の勘定科目表を入れる', checkInput('copy_standard_accounts', true), true) +
-        '<div class="field wide muted">チェックを外すと科目が空の状態で作成されます。自前の科目表を CSV で取り込む場合や、他の顧問先から複写する場合に使ってください。会計期間は当期が自動作成されます。</div>' : ''),
+      (isNew ? field('入れる勘定科目表', selectInput('chart', (S.meta.charts || []).map(x => ({ value: x.code, label: x.name })), 'tkc'), true) +
+        '<div class="field wide muted">作成後も「勘定科目」画面で自由に変更できます。会計期間は当期が自動作成されます。</div>' : ''),
       async (d) => {
         const body = { code: d.code.trim(), name: d.name.trim(), kana: d.kana.trim(), entity_type: d.entity_type, tax_method: d.tax_method, fiscal_start_month: Number(d.fiscal_start_month), note: d.note };
-        if (isNew) body.copy_standard_accounts = !!d.copy_standard_accounts;
+        if (isNew) body.chart = d.chart;
         let saved;
         if (isNew) saved = await POST('/api/clients', body); else saved = await PUT(`/api/clients/${c.id}`, body);
         S.clients = await GET('/api/clients');
