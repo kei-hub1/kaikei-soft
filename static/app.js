@@ -13,6 +13,8 @@ const S = {
   subById: {},
   departments: [],
   templates: [],
+  descriptions: [],       // 摘要プリセット
+  descriptionItems: [],   // 入力候補 (プリセット + 過去に使った摘要)
   taxById: {},
 };
 
@@ -219,7 +221,7 @@ async function selectClient(id, keepFy = false) {
   localStorage.setItem('clientId', S.client ? S.client.id : '');
   if (!S.client) {
     S.fiscalYears = []; S.fy = null; S.accounts = []; S.accountById = {}; S.subsByAccount = {}; S.subById = {};
-    S.departments = []; S.templates = [];
+    S.departments = []; S.templates = []; S.descriptions = []; S.descriptionItems = [];
     $('#sel-fy').innerHTML = '';
     $('#client-badges').innerHTML = '';
     return;
@@ -228,7 +230,7 @@ async function selectClient(id, keepFy = false) {
   const tm = S.meta.tax_methods.find(t => t.code === c.tax_method);
   $('#client-badges').innerHTML =
     `<span class="badge">${c.entity_type === 'sole' ? '個人' : '法人'}</span> <span class="badge">${esc(tm ? tm.name : c.tax_method)}</span>`;
-  await Promise.all([loadFiscalYears(keepFy), loadAccounts(), loadDepartments(), loadTemplates()]);
+  await Promise.all([loadFiscalYears(keepFy), loadAccounts(), loadDepartments(), loadTemplates(), loadDescriptions()]);
 }
 
 async function loadFiscalYears(keep = false) {
@@ -266,6 +268,17 @@ async function loadAccounts() {
 }
 async function loadDepartments() { S.departments = await GET(`/api/clients/${S.client.id}/departments`); }
 async function loadTemplates() { S.templates = await GET(`/api/clients/${S.client.id}/templates`); }
+
+/** 摘要プリセットと、仕訳入力で出す候補 (プリセット + 過去に使った摘要) を読み込む。 */
+async function loadDescriptions() {
+  const [presets, sug] = await Promise.all([
+    GET(`/api/clients/${S.client.id}/descriptions`),
+    GET(`/api/clients/${S.client.id}/description-suggestions`),
+  ]);
+  S.descriptions = presets;
+  S.descriptionItems = sug.presets.concat(
+    sug.history.map(h => ({ id: null, code: '', text: h.text, kana: '', account_id: null, used: h.n })));
+}
 
 // ---------------------------------------------------------------- router
 let currentRoute = null;

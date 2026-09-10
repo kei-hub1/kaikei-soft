@@ -126,6 +126,19 @@ CREATE INDEX IF NOT EXISTS idx_lines_entry ON journal_lines(entry_id);
 CREATE INDEX IF NOT EXISTS idx_lines_debit ON journal_lines(debit_account_id);
 CREATE INDEX IF NOT EXISTS idx_lines_credit ON journal_lines(credit_account_id);
 
+CREATE TABLE IF NOT EXISTS descriptions (
+  id INTEGER PRIMARY KEY,
+  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  code TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL,
+  kana TEXT NOT NULL DEFAULT '',
+  account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(client_id, text)
+);
+CREATE INDEX IF NOT EXISTS idx_descriptions_client ON descriptions(client_id, sort_order);
+
 CREATE TABLE IF NOT EXISTS entry_templates (
   id INTEGER PRIMARY KEY,
   client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
@@ -157,10 +170,29 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+# 既存の DB に後から追加した列。(テーブル名, 列名, 定義) を並べておけば起動時に補う。
+# 新しいテーブルは SCHEMA の CREATE TABLE IF NOT EXISTS で自動的に作られる。
+ADDED_COLUMNS: list[tuple[str, str, str]] = [
+]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, ddl in ADDED_COLUMNS:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        if not exists:
+            continue
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 def init_db() -> None:
+    """スキーマを作成・更新する。既存の DB でも安全に呼べる (CREATE ... IF NOT EXISTS)。"""
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.commit()
     finally:
         conn.close()

@@ -573,3 +573,228 @@ def test_apply_chart_to_existing_client(client):
 
     assert client.post(f"/api/clients/{cid}/accounts/apply-chart", params={"chart": "none"}).status_code == 400
     assert client.post(f"/api/clients/{cid}/accounts/apply-chart", params={"mode": "xx"}).status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 摘要プリセットと摘要順
+# ---------------------------------------------------------------------------
+
+def test_description_presets_crud(client):
+    cl, fy, acc = make_client(client)
+    cid = cl["id"]
+    assert client.get(f"/api/clients/{cid}/descriptions").json() == []
+
+    r = client.post(f"/api/clients/{cid}/descriptions", json={
+        "code": "1", "text": "株式会社アオイ商店", "kana": "あおいしょうてん",
+        "account_id": acc["500"]["id"]})
+    assert r.status_code == 201, r.text
+    d1 = r.json()
+    assert d1["sort_order"] == 10
+
+    # 同じ摘要は登録できない
+    assert client.post(f"/api/clients/{cid}/descriptions", json={"text": "株式会社アオイ商店"}).status_code == 409
+    # 他の顧問先の科目は関連付けられない
+    other, _, oacc = make_client(client, code="002")
+    assert client.post(f"/api/clients/{cid}/descriptions",
+                       json={"text": "X", "account_id": oacc["100"]["id"]}).status_code == 400
+
+    r = client.put(f"/api/descriptions/{d1['id']}", json={
+        "code": "1", "text": "(株)アオイ商店", "kana": "あおいしょうてん", "account_id": None, "active": False})
+    assert r.status_code == 200 and r.json()["text"] == "(株)アオイ商店" and r.json()["active"] == 0
+
+    assert client.delete(f"/api/descriptions/{d1['id']}").status_code == 204
+    assert client.get(f"/api/clients/{cid}/descriptions").json() == []
+
+
+def test_description_presets_bulk_and_suggestions(client):
+    cl, fy, acc = make_client(client)
+    cid, d = cl["id"], fy["start_date"]
+    items = [
+        {"id": None, "code": "1", "text": "アオイ商店", "kana": "あおい", "account_id": acc["130"]["id"], "active": True},
+        {"id": None, "code": "2", "text": "カキ工業", "kana": "かき", "account_id": None, "active": True},
+        {"id": None, "code": "3", "text": "使わない摘要", "kana": "", "account_id": None, "active": False},
+    ]
+    r = client.put(f"/api/clients/{cid}/descriptions/bulk", json={"items": items, "delete_ids": []})
+    assert r.status_code == 200 and r.json()["created"] == 3
+    saved = client.get(f"/api/clients/{cid}/descriptions").json()
+    assert [x["text"] for x in saved] == ["アオイ商店", "カキ工業", "使わない摘要"]
+    assert saved[0]["account_code"] == "130"
+
+    # 重複は拒否
+    dup = items + [{"id": None, "code": "9", "text": "アオイ商店", "active": True}]
+    assert client.put(f"/api/clients/{cid}/descriptions/bulk", json={"items": dup, "delete_ids": []}).status_code == 409
+
+    # 候補: 有効なプリセット + 過去に使った摘要 (プリセットと重複するものは除く)
+    client.post(f"/api/clients/{cid}/entries", json={"entry_date": d, "lines": [
+        {"debit_account_id": acc["100"]["id"], "credit_account_id": acc["500"]["id"],
+         "amount": 1000, "description": "アオイ商店"}]}).raise_for_status()
+    client.post(f"/api/clients/{cid}/entries", json={"entry_date": d, "lines": [
+        {"debit_account_id": acc["100"]["id"], "credit_account_id": acc["500"]["id"],
+         "amount": 2000, "description": "その場で打った摘要"}]}).raise_for_status()
+    sug = client.get(f"/api/clients/{cid}/description-suggestions").json()
+    assert [p["text"] for p in sug["presets"]] == ["アオイ商店", "カキ工業"]   # 無効は出ない
+    assert [h["text"] for h in sug["history"]] == ["その場で打った摘要"]
+
+    # プリセットを消しても入力済みの仕訳の摘要は残る
+    target = next(x for x in saved if x["text"] == "アオイ商店")
+    client.delete(f"/api/descriptions/{target['id']}")
+    e = client.get(f"/api/clients/{cid}/entries").json()["entries"][0]
+    assert e["lines"][0]["description"] == "アオイ商店"
+
+
+def test_descriptions_from_history(client):
+    cl, fy, acc = make_client(client)
+    cid, d = cl["id"], fy["start_date"]
+    for text, times in [("よく使う摘要", 3), ("たまに使う摘要", 1)]:
+        for _ in range(times):
+            client.post(f"/api/clients/{cid}/entries", json={"entry_date": d, "lines": [
+                {"debit_account_id": acc["100"]["id"], "credit_account_id": acc["500"]["id"],
+                 "amount": 100, "description": text}]}).raise_for_status()
+    r = client.post(f"/api/clients/{cid}/descriptions/from-history", params={"min_count": 2})
+    assert r.status_code == 200 and r.json()["added"] == 1
+    assert [x["text"] for x in client.get(f"/api/clients/{cid}/descriptions").json()] == ["よく使う摘要"]
+    # 2 回目は重複しない
+    assert client.post(f"/api/clients/{cid}/descriptions/from-history", params={"min_count": 2}).json()["added"] == 0
+
+
+def post_described_entries(client, cid, d, acc):
+    for day, text, amount in [
+        ("01", "カキ工業", 3000), ("02", "アオイ商店", 1000), ("03", "カキ工業", 5000),
+        ("04", "アオイ商店", 2000), ("05", "", 700),
+    ]:
+        client.post(f"/api/clients/{cid}/entries", json={"entry_date": d[:8] + day, "lines": [
+            {"debit_account_id": acc["100"]["id"], "credit_account_id": acc["500"]["id"],
+             "amount": amount, "description": text}]}).raise_for_status()
+
+
+def test_entries_sorted_by_description(client):
+    cl, fy, acc = make_client(client)
+    cid = cl["id"]
+    post_described_entries(client, cid, fy["start_date"], acc)
+
+    by_date = client.get(f"/api/clients/{cid}/entries").json()["entries"]
+    assert [e["lines"][0]["description"] for e in by_date] == ["カキ工業", "アオイ商店", "カキ工業", "アオイ商店", ""]
+
+    by_desc = client.get(f"/api/clients/{cid}/entries", params={"sort": "description"}).json()["entries"]
+    got = [e["lines"][0]["description"] for e in by_desc]
+    assert got == sorted(got, key=lambda s: (s == "", s))          # 同じ摘要がまとまる
+    assert got[:2] == ["アオイ商店", "アオイ商店"]
+    assert got[-1] == ""                                            # 摘要なしは最後
+    # 同じ摘要の中では日付順
+    aoi = [e for e in by_desc if e["lines"][0]["description"] == "アオイ商店"]
+    assert [e["entry_date"] for e in aoi] == sorted(e["entry_date"] for e in aoi)
+
+    # 摘要の完全一致で絞り込める
+    only = client.get(f"/api/clients/{cid}/entries", params={"description": "カキ工業"}).json()
+    assert only["total"] == 2
+    assert all(e["lines"][0]["description"] == "カキ工業" for e in only["entries"])
+
+    assert client.get(f"/api/clients/{cid}/entries", params={"sort": "ありえない"}).status_code == 400
+
+
+def test_ledger_sorted_by_description(client):
+    cl, fy, acc = make_client(client)
+    cid = cl["id"]
+    post_described_entries(client, cid, fy["start_date"], acc)
+    cash = acc["100"]["id"]
+
+    r = client.get(f"/api/fiscal-years/{fy['id']}/reports/ledger",
+                   params={"account_id": cash, "sort": "description"}).json()
+    assert r["sort"] == "description"
+    assert [x["description"] for x in r["rows"]] == ["アオイ商店", "アオイ商店", "カキ工業", "カキ工業", ""]
+    groups = {g["description"]: g for g in r["groups"]}
+    assert groups["アオイ商店"]["count"] == 2 and groups["アオイ商店"]["debit"] == 3000
+    assert groups["カキ工業"]["count"] == 2 and groups["カキ工業"]["debit"] == 8000
+    assert groups[""]["debit"] == 700
+    # 合計は日付順と同じ
+    d = client.get(f"/api/fiscal-years/{fy['id']}/reports/ledger", params={"account_id": cash}).json()
+    assert r["total_debit"] == d["total_debit"] == 11700
+    assert d["sort"] == "date" and d["groups"] == []
+    assert client.get(f"/api/fiscal-years/{fy['id']}/reports/ledger",
+                      params={"account_id": cash, "sort": "xx"}).status_code == 400
+
+
+def test_description_summary_report(client):
+    cl, fy, acc = make_client(client)
+    cid = cl["id"]
+    post_described_entries(client, cid, fy["start_date"], acc)
+
+    r = client.get(f"/api/fiscal-years/{fy['id']}/reports/description-summary").json()
+    rows = {x["description"]: x for x in r["rows"]}
+    assert [x["description"] for x in r["rows"]] == ["アオイ商店", "カキ工業", ""]
+    # 現金と売上高の両方に転記されるので 1 摘要あたり 2 行
+    assert rows["カキ工業"]["count"] == 4
+    assert rows["カキ工業"]["debit"] == 8000 and rows["カキ工業"]["credit"] == 8000
+    assert rows["カキ工業"]["net"] == 0
+    assert rows["カキ工業"]["accounts"] == ["100 現金", "500 売上高"]
+    assert rows["アオイ商店"]["first_date"] < rows["アオイ商店"]["last_date"]
+    assert r["total_debit"] == r["total_credit"] == 11700
+
+    # 科目で絞ると片側だけになる
+    only = client.get(f"/api/fiscal-years/{fy['id']}/reports/description-summary",
+                      params={"account_id": acc["100"]["id"]}).json()
+    rows = {x["description"]: x for x in only["rows"]}
+    assert rows["カキ工業"]["count"] == 2 and rows["カキ工業"]["debit"] == 8000
+    assert rows["カキ工業"]["credit"] == 0
+    assert only["account"]["code"] == "100"
+
+
+def test_descriptions_csv_roundtrip(client):
+    cl, fy, acc = make_client(client)
+    cid = cl["id"]
+    client.put(f"/api/clients/{cid}/descriptions/bulk", json={"items": [
+        {"id": None, "code": "1", "text": "アオイ商店", "kana": "あおい", "account_id": acc["130"]["id"], "active": True},
+        {"id": None, "code": "2", "text": "カキ工業", "kana": "かき", "account_id": None, "active": True},
+    ], "delete_ids": []}).raise_for_status()
+
+    r = client.get(f"/api/clients/{cid}/export/descriptions.csv")
+    assert r.status_code == 200
+    text = r.content.decode("utf-8-sig")
+    assert text.splitlines()[0].startswith("コード,摘要,かな,関連科目コード,並び順,有効")
+    assert "アオイ商店" in text and "130" in text
+
+    cl2, _, _ = make_client(client, code="002")
+    files = {"file": ("d.csv", io.BytesIO(r.content), "text/csv")}
+    dry = client.post(f"/api/clients/{cl2['id']}/import/descriptions", params={"dry_run": True}, files=files)
+    assert dry.status_code == 200 and dry.json()["created"] == 2
+
+    files = {"file": ("d.csv", io.BytesIO(r.content), "text/csv")}
+    assert client.post(f"/api/clients/{cl2['id']}/import/descriptions", files=files).status_code == 200
+    got = client.get(f"/api/clients/{cl2['id']}/descriptions").json()
+    assert [x["text"] for x in got] == ["アオイ商店", "カキ工業"]
+    assert got[0]["account_code"] == "130"
+
+    # 不正な科目コードと摘要の重複は拒否
+    def send(body, **params):
+        f = {"file": ("d.csv", io.BytesIO(body.encode("utf-8")), "text/csv")}
+        return client.post(f"/api/clients/{cid}/import/descriptions", params=params, files=f)
+    head = "コード,摘要,関連科目コード\r\n"
+    assert send(head + "1,X,9999\r\n").status_code == 400
+    assert send(head + "1,X,\r\n2,X,\r\n").status_code == 400
+    assert send("コード,かな\r\n1,あ\r\n").status_code == 400   # 「摘要」列が無い
+
+
+def test_description_sort_uses_kana_when_registered(client):
+    """かなを登録した摘要は五十音順に並ぶ。"""
+    cl, fy, acc = make_client(client)
+    cid, d = cl["id"], fy["start_date"]
+    # 漢字の文字コード順と五十音順が食い違う組み合わせ
+    presets = [("株式会社アオイ商店", "あおいしょうてん"),
+               ("有限会社ウメダ", "うめだ"),
+               ("カキ工業", "かきこうぎょう")]
+    client.put(f"/api/clients/{cid}/descriptions/bulk", json={"items": [
+        {"id": None, "code": str(i + 1), "text": t, "kana": k, "active": True}
+        for i, (t, k) in enumerate(presets)], "delete_ids": []}).raise_for_status()
+    for i, (t, _k) in enumerate(reversed(presets)):
+        client.post(f"/api/clients/{cid}/entries", json={"entry_date": d, "lines": [
+            {"debit_account_id": acc["100"]["id"], "credit_account_id": acc["500"]["id"],
+             "amount": 1000 * (i + 1), "description": t}]}).raise_for_status()
+
+    wanted = [t for t, _k in presets]
+    entries = client.get(f"/api/clients/{cid}/entries", params={"sort": "description"}).json()["entries"]
+    assert [e["lines"][0]["description"] for e in entries] == wanted
+    led = client.get(f"/api/fiscal-years/{fy['id']}/reports/ledger",
+                     params={"account_id": acc["100"]["id"], "sort": "description"}).json()
+    assert [g["description"] for g in led["groups"]] == wanted
+    summ = client.get(f"/api/fiscal-years/{fy['id']}/reports/description-summary").json()
+    assert [r["description"] for r in summ["rows"]] == wanted

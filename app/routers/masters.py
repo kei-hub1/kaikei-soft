@@ -404,6 +404,171 @@ def delete_department(dept_id: int):
 
 
 # ---------------------------------------------------------------------------
+# 摘要プリセット
+#   よく使う摘要 (売上先・仕入先など) を登録しておき、仕訳入力で呼び出す。
+# ---------------------------------------------------------------------------
+
+class DescriptionIn(BaseModel):
+    code: str = ""                       # 呼び出し用の短縮コード (任意)
+    text: str = Field(min_length=1)
+    kana: str = ""
+    account_id: int | None = None        # 関連する科目 (任意)。入力時に優先表示する
+    sort_order: int | None = None
+    active: bool = True
+
+
+class DescriptionEdit(DescriptionIn):
+    id: int | None = None
+
+
+class DescriptionsBulkIn(BaseModel):
+    items: list[DescriptionEdit]
+    delete_ids: list[int] = []
+
+
+@router.get("/clients/{client_id}/descriptions")
+def list_descriptions(client_id: int):
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT d.*, a.code AS account_code, a.name AS account_name FROM descriptions d "
+            "LEFT JOIN accounts a ON a.id=d.account_id WHERE d.client_id=? ORDER BY d.sort_order, d.code, d.text",
+            (client_id,)).fetchall()
+        return rows_to_dicts(rows)
+
+
+@router.get("/clients/{client_id}/description-suggestions")
+def description_suggestions(client_id: int, limit: int = 300):
+    """仕訳入力の摘要候補。プリセットを先に、過去に使った摘要を後に返す。"""
+    with db() as conn:
+        presets = conn.execute(
+            "SELECT id, code, text, kana, account_id FROM descriptions "
+            "WHERE client_id=? AND active=1 ORDER BY sort_order, code, text", (client_id,)).fetchall()
+        seen = {r["text"] for r in presets}
+        used = conn.execute(
+            "SELECT l.description AS text, COUNT(*) AS n, MAX(e.entry_date) AS last_used "
+            "FROM journal_lines l JOIN journal_entries e ON e.id=l.entry_id "
+            "WHERE e.client_id=? AND l.description<>'' GROUP BY l.description "
+            "ORDER BY n DESC, last_used DESC LIMIT ?", (client_id, limit)).fetchall()
+        return {
+            "presets": [dict(r) for r in presets],
+            "history": [dict(r) for r in used if r["text"] not in seen],
+        }
+
+
+def _validate_description(conn, client_id: int, d: DescriptionIn, self_id: int | None = None) -> None:
+    if d.account_id is not None:
+        ok = conn.execute("SELECT 1 FROM accounts WHERE id=? AND client_id=?",
+                          (d.account_id, client_id)).fetchone()
+        if not ok:
+            raise HTTPException(400, "関連科目が不正です")
+    dup = conn.execute(
+        "SELECT 1 FROM descriptions WHERE client_id=? AND text=? AND id IS NOT ?",
+        (client_id, d.text.strip(), self_id)).fetchone()
+    if dup:
+        raise HTTPException(409, f"同じ摘要「{d.text.strip()}」が既に登録されています")
+
+
+@router.post("/clients/{client_id}/descriptions", status_code=201)
+def create_description(client_id: int, d: DescriptionIn):
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM clients WHERE id=?", (client_id,)).fetchone():
+            raise HTTPException(404, "顧問先が見つかりません")
+        _validate_description(conn, client_id, d)
+        order = d.sort_order
+        if order is None:
+            r = conn.execute("SELECT MAX(sort_order) FROM descriptions WHERE client_id=?", (client_id,)).fetchone()
+            order = (r[0] or 0) + 10
+        cur = conn.execute(
+            "INSERT INTO descriptions(client_id,code,text,kana,account_id,sort_order,active) VALUES(?,?,?,?,?,?,?)",
+            (client_id, d.code.strip(), d.text.strip(), d.kana.strip(), d.account_id, order, int(d.active)))
+        return dict(conn.execute("SELECT * FROM descriptions WHERE id=?", (cur.lastrowid,)).fetchone())
+
+
+@router.put("/descriptions/{did}")
+def update_description(did: int, d: DescriptionIn):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM descriptions WHERE id=?", (did,)).fetchone()
+        if not row:
+            raise HTTPException(404, "摘要が見つかりません")
+        _validate_description(conn, row["client_id"], d, did)
+        conn.execute(
+            "UPDATE descriptions SET code=?,text=?,kana=?,account_id=?,sort_order=?,active=? WHERE id=?",
+            (d.code.strip(), d.text.strip(), d.kana.strip(), d.account_id,
+             d.sort_order if d.sort_order is not None else row["sort_order"], int(d.active), did))
+        return dict(conn.execute("SELECT * FROM descriptions WHERE id=?", (did,)).fetchone())
+
+
+@router.delete("/descriptions/{did}", status_code=204)
+def delete_description(did: int):
+    """プリセットを消しても、既に入力済みの仕訳の摘要はそのまま残る。"""
+    with db() as conn:
+        conn.execute("DELETE FROM descriptions WHERE id=?", (did,))
+
+
+@router.put("/clients/{client_id}/descriptions/bulk")
+def save_descriptions_bulk(client_id: int, body: DescriptionsBulkIn):
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM clients WHERE id=?", (client_id,)).fetchone():
+            raise HTTPException(404, "顧問先が見つかりません")
+        seen: dict[str, int] = {}
+        for i, d in enumerate(body.items, 1):
+            text = d.text.strip()
+            if not text:
+                raise HTTPException(400, f"{i} 行目: 摘要は必須です")
+            if text in seen:
+                raise HTTPException(409, f"摘要「{text}」が {seen[text]} 行目と {i} 行目で重複しています")
+            seen[text] = i
+            if d.account_id is not None and not conn.execute(
+                    "SELECT 1 FROM accounts WHERE id=? AND client_id=?", (d.account_id, client_id)).fetchone():
+                raise HTTPException(400, f"{i} 行目: 関連科目が不正です")
+
+        for did in body.delete_ids:
+            conn.execute("DELETE FROM descriptions WHERE id=? AND client_id=?", (did, client_id))
+
+        created = updated = 0
+        for order, d in enumerate(body.items):
+            values = (d.code.strip(), d.text.strip(), d.kana.strip(), d.account_id,
+                      d.sort_order if d.sort_order is not None else order * 10, int(d.active))
+            if d.id is None:
+                conn.execute(
+                    "INSERT INTO descriptions(code,text,kana,account_id,sort_order,active,client_id) "
+                    "VALUES(?,?,?,?,?,?,?)", values + (client_id,))
+                created += 1
+            else:
+                conn.execute(
+                    "UPDATE descriptions SET code=?,text=?,kana=?,account_id=?,sort_order=?,active=? "
+                    "WHERE id=? AND client_id=?", values + (d.id, client_id))
+                updated += 1
+        return {"created": created, "updated": updated, "deleted": len(body.delete_ids)}
+
+
+@router.post("/clients/{client_id}/descriptions/from-history")
+def descriptions_from_history(client_id: int, min_count: int = 2, limit: int = 200):
+    """過去の仕訳でよく使った摘要を、まとめてプリセットに登録する。"""
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM clients WHERE id=?", (client_id,)).fetchone():
+            raise HTTPException(404, "顧問先が見つかりません")
+        existing = {r["text"] for r in conn.execute(
+            "SELECT text FROM descriptions WHERE client_id=?", (client_id,)).fetchall()}
+        rows = conn.execute(
+            "SELECT l.description AS text, COUNT(*) AS n FROM journal_lines l "
+            "JOIN journal_entries e ON e.id=l.entry_id WHERE e.client_id=? AND l.description<>'' "
+            "GROUP BY l.description HAVING COUNT(*)>=? ORDER BY n DESC LIMIT ?",
+            (client_id, min_count, limit)).fetchall()
+        r = conn.execute("SELECT MAX(sort_order) FROM descriptions WHERE client_id=?", (client_id,)).fetchone()
+        order = (r[0] or 0) + 10
+        added = 0
+        for row in rows:
+            if row["text"] in existing:
+                continue
+            conn.execute("INSERT INTO descriptions(client_id,code,text,kana,sort_order,active) VALUES(?,?,?,?,?,1)",
+                         (client_id, "", row["text"], "", order))
+            order += 10
+            added += 1
+        return {"added": added, "candidates": len(rows)}
+
+
+# ---------------------------------------------------------------------------
 # 定型仕訳
 # ---------------------------------------------------------------------------
 

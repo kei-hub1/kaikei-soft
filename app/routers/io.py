@@ -342,6 +342,102 @@ async def import_accounts_csv(client_id: int, file: UploadFile, mode: str = "mer
         return result
 
 
+DESCRIPTION_CSV_HEADER = ["コード", "摘要", "かな", "関連科目コード", "並び順", "有効"]
+
+
+@router.get("/clients/{client_id}/export/descriptions.csv")
+def export_descriptions_csv(client_id: int):
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT d.*, a.code AS account_code FROM descriptions d LEFT JOIN accounts a ON a.id=d.account_id "
+            "WHERE d.client_id=? ORDER BY d.sort_order, d.code, d.text", (client_id,)).fetchall()
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")
+    w.writerow(DESCRIPTION_CSV_HEADER)
+    for r in rows:
+        w.writerow([r["code"], r["text"], r["kana"], r["account_code"] or "", r["sort_order"], 1 if r["active"] else 0])
+    return Response(content=("﻿" + buf.getvalue()).encode("utf-8"), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": 'attachment; filename="descriptions.csv"'})
+
+
+@router.post("/clients/{client_id}/import/descriptions")
+async def import_descriptions_csv(client_id: int, file: UploadFile, mode: str = "merge", dry_run: bool = False):
+    """摘要プリセットを CSV から取り込む。「摘要」の文字列で既存と照合する。"""
+    if mode not in ("merge", "replace"):
+        raise HTTPException(400, "mode は merge / replace のいずれか")
+    text = _decode(await file.read())
+    reader = csv.reader(io.StringIO(text))
+    try:
+        header = [h.strip().lstrip("﻿") for h in next(reader)]
+    except StopIteration:
+        raise HTTPException(400, "CSV が空です")
+    idx = {h: i for i, h in enumerate(header)}
+    if "摘要" not in idx:
+        raise HTTPException(400, "「摘要」の列が必要です")
+
+    def col(row, name, default=""):
+        i = idx.get(name)
+        return row[i].strip() if i is not None and i < len(row) else default
+
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM clients WHERE id=?", (client_id,)).fetchone():
+            raise HTTPException(404, "顧問先が見つかりません")
+        by_code = {a["code"]: a["id"] for a in conn.execute(
+            "SELECT id, code FROM accounts WHERE client_id=?", (client_id,)).fetchall()}
+
+        parsed: list[dict] = []
+        seen: dict[str, int] = {}
+        for rowno, row in enumerate(reader, 2):
+            if not any(c.strip() for c in row):
+                continue
+            body = col(row, "摘要")
+            if body.startswith("#"):
+                continue
+            if not body:
+                raise HTTPException(400, f"{rowno} 行目: 摘要は必須です")
+            if body in seen:
+                raise HTTPException(400, f"{rowno} 行目: 摘要「{body}」が {seen[body]} 行目と重複しています")
+            seen[body] = rowno
+            acode = col(row, "関連科目コード")
+            if acode and acode not in by_code:
+                raise HTTPException(400, f"{rowno} 行目: 科目コード '{acode}' が見つかりません")
+            order_s = col(row, "並び順")
+            parsed.append({
+                "code": col(row, "コード"), "text": body, "kana": col(row, "かな"),
+                "account_id": by_code.get(acode) if acode else None,
+                "sort_order": _to_int(order_s) if order_s else len(parsed) * 10,
+                "active": 1 if resolve_bool(col(row, "有効")) else 0,
+            })
+        if not parsed:
+            raise HTTPException(400, "取り込む行がありません")
+
+        existing = {r["text"]: dict(r) for r in conn.execute(
+            "SELECT * FROM descriptions WHERE client_id=?", (client_id,)).fetchall()}
+        created = [p for p in parsed if p["text"] not in existing]
+        updated = [p for p in parsed if p["text"] in existing]
+        removed = [d for t, d in existing.items() if t not in seen] if mode == "replace" else []
+        result = {"created": len(created), "updated": len(updated), "deleted": len(removed),
+                  "kept": 0 if mode == "replace" else len(existing) - len(updated), "dry_run": dry_run,
+                  "deleted_names": [d["text"] for d in removed][:20]}
+        if dry_run:
+            return result
+
+        for p in parsed:
+            cur = existing.get(p["text"])
+            if cur:
+                conn.execute(
+                    "UPDATE descriptions SET code=?,kana=?,account_id=?,sort_order=?,active=? WHERE id=?",
+                    (p["code"], p["kana"], p["account_id"], p["sort_order"], p["active"], cur["id"]))
+            else:
+                conn.execute(
+                    "INSERT INTO descriptions(client_id,code,text,kana,account_id,sort_order,active) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (client_id, p["code"], p["text"], p["kana"], p["account_id"], p["sort_order"], p["active"]))
+        for d in removed:
+            conn.execute("DELETE FROM descriptions WHERE id=?", (d["id"],))
+        return result
+
+
 @router.get("/backup")
 def download_backup():
     path = get_db_path()

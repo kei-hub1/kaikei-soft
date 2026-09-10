@@ -439,6 +439,199 @@ routes.accounts = async function (main) {
   return () => window.removeEventListener('beforeunload', warnUnsaved);
 };
 
+// ---------------------------------------------------------------- 摘要プリセット
+routes.descriptions = async function (main) {
+  let rows = [];
+  let removed = [];
+  let dirty = false;
+
+  const snapshot = () => S.descriptions.map(d => ({
+    id: d.id, code: d.code, text: d.text, kana: d.kana,
+    account_id: d.account_id, sort_order: d.sort_order, active: !!d.active,
+  }));
+
+  main.innerHTML = `<h2>摘要</h2>
+  <div class="toolbar no-print">
+    <div class="field"><span>検索</span><input id="d-q" style="width:180px" placeholder="コード・摘要・かな"></div>
+    <button id="d-add">行を追加</button>
+    <button id="d-history">過去の仕訳から取り込む</button>
+    <span style="flex:1"></span>
+    <button id="d-import">CSV 取込</button>
+    <a class="btn" href="/api/clients/${S.client.id}/export/descriptions.csv">CSV 出力</a>
+    <button id="d-save" class="primary">変更を保存</button>
+  </div>
+  <div class="panel" style="padding-top:6px">
+    <div class="row between" style="margin-bottom:4px">
+      <span class="muted">よく使う摘要 (売上先・仕入先など) を登録しておくと、仕訳入力の摘要欄で呼び出せます。
+        コードを付けておくと、そのコードを打って <kbd>Enter</kbd> で本文に展開されます。</span>
+      <span id="d-status" class="muted"></span>
+    </div>
+    <div class="scroll-x"><table class="grid compact sticky-head" id="d-table"><thead><tr>
+      <th style="width:80px">コード</th><th style="width:280px">摘要</th><th style="width:180px">かな</th>
+      <th style="width:200px">関連科目</th><th style="width:70px">並び順</th><th style="width:60px">有効</th><th style="width:50px"></th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>`;
+
+  const acctOptions = '<option value="">(なし)</option>' +
+    S.accounts.filter(a => a.active).map(a => `<option value="${a.id}">${esc(a.code)} ${esc(a.name)}</option>`).join('');
+
+  function markDirty() { dirty = true; $('#d-status').innerHTML = '<span class="badge warn">未保存の変更があります</span>'; }
+  function clearDirty() { dirty = false; removed = []; $('#d-status').textContent = ''; }
+
+  function draw() {
+    const q = $('#d-q').value.trim().toLowerCase();
+    const list = rows.filter(r => !q || (r.code || '').toLowerCase().includes(q)
+      || (r.text || '').toLowerCase().includes(q) || (r.kana || '').includes(q));
+    $('#d-table tbody').innerHTML = list.map(r => {
+      const i = rows.indexOf(r);
+      return `<tr data-i="${i}">
+        <td><input class="code" data-f="code" value="${esc(r.code || '')}" maxlength="10"></td>
+        <td><input data-f="text" value="${esc(r.text)}"></td>
+        <td><input data-f="kana" value="${esc(r.kana || '')}"></td>
+        <td><select data-f="account_id">${acctOptions}</select></td>
+        <td><input class="num" data-f="sort_order" value="${r.sort_order}"></td>
+        <td class="center"><input type="checkbox" data-f="active" ${r.active ? 'checked' : ''}></td>
+        <td class="center"><button class="small danger" data-del="${i}">×</button></td></tr>`;
+    }).join('') || '<tr><td colspan="7" class="empty">摘要が登録されていません。「行を追加」または「過去の仕訳から取り込む」で登録してください。</td></tr>';
+    for (const tr of $$('#d-table tbody tr[data-i]')) {
+      tr.querySelector('[data-f=account_id]').value = rows[Number(tr.dataset.i)].account_id || '';
+    }
+    if (!dirty) $('#d-status').innerHTML = `<span class="muted">${rows.length} 件</span>`;
+  }
+
+  const onEdit = (e) => {
+    const tr = e.target.closest('tr[data-i]');
+    if (!tr || !e.target.dataset.f) return;
+    const r = rows[Number(tr.dataset.i)];
+    const f = e.target.dataset.f;
+    if (f === 'active') r[f] = e.target.checked;
+    else if (f === 'sort_order') r[f] = parseAmount(e.target.value);
+    else if (f === 'account_id') r[f] = Number(e.target.value) || null;
+    else r[f] = e.target.value;
+    markDirty();
+  };
+  $('#d-table').addEventListener('input', onEdit);
+  $('#d-table').addEventListener('change', onEdit);
+  $('#d-table').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-del]');
+    if (!b) return;
+    const i = Number(b.dataset.del);
+    if (rows[i].id) removed.push(rows[i].id);
+    rows.splice(i, 1);
+    markDirty();
+    draw();
+  });
+
+  $('#d-add').onclick = () => {
+    const max = rows.reduce((m, r) => Math.max(m, Number(r.sort_order) || 0), 0);
+    rows.push({ id: null, code: '', text: '', kana: '', account_id: null, sort_order: max + 10, active: true });
+    markDirty();
+    draw();
+    const trs = $$('#d-table tbody tr[data-i]');
+    const last = trs[trs.length - 1];
+    if (last) last.querySelector('[data-f=text]').focus();
+  };
+
+  $('#d-save').onclick = async () => {
+    const seen = {};
+    for (const r of rows) {
+      const t = String(r.text).trim();
+      if (!t) { toast('摘要は必須です', true); return; }
+      if (seen[t]) { toast(`摘要「${t}」が重複しています`, true); return; }
+      seen[t] = true;
+    }
+    try {
+      const res = await PUT(`/api/clients/${S.client.id}/descriptions/bulk`, {
+        items: rows.map(r => ({
+          id: r.id, code: String(r.code || '').trim(), text: String(r.text).trim(),
+          kana: String(r.kana || '').trim(), account_id: r.account_id || null,
+          sort_order: Number(r.sort_order) || 0, active: !!r.active,
+        })),
+        delete_ids: removed,
+      });
+      await loadDescriptions();
+      rows = snapshot();
+      clearDirty();
+      draw();
+      toast(`保存しました (追加 ${res.created} / 更新 ${res.updated} / 削除 ${res.deleted})`);
+    } catch (e) { showError(e); }
+  };
+
+  $('#d-history').onclick = () => {
+    modal(`<h3>過去の仕訳から摘要を取り込む</h3>
+      <p class="muted" style="margin-top:0">これまでに入力した仕訳の摘要のうち、指定回数以上使ったものをプリセットに登録します。</p>
+      <div class="form"><label class="field wide"><span>何回以上使った摘要を取り込むか</span>
+        <input type="number" id="dh-min" value="2" min="1" max="99"></label></div>
+      <div class="actions"><button data-close>キャンセル</button><button class="primary" id="dh-run">取り込む</button></div>`, {
+      onOpen(bg, close) {
+        $('#dh-run', bg).onclick = async () => {
+          try {
+            const n = Number($('#dh-min', bg).value) || 2;
+            const r = await POST(`/api/clients/${S.client.id}/descriptions/from-history?min_count=${n}`);
+            await loadDescriptions();
+            rows = snapshot();
+            clearDirty();
+            draw();
+            close();
+            toast(r.added ? `${r.added} 件の摘要を登録しました` : '新しく登録できる摘要はありませんでした');
+          } catch (e) { showError(e); }
+        };
+      },
+    });
+  };
+
+  $('#d-import').onclick = () => {
+    modal(`<h3>摘要 CSV の取込</h3>
+      <p class="muted" style="margin-top:0">列: コード, 摘要, かな, 関連科目コード, 並び順, 有効<br>
+      「摘要」の文字列で既存と照合します。文字コードは UTF-8 / Shift_JIS のどちらでも構いません。</p>
+      <div class="form">
+        <label class="field wide"><span>CSV ファイル</span><input type="file" id="di-file" accept=".csv,text/csv"></label>
+        <label class="field wide"><span>取込方法</span>
+          <select id="di-mode">
+            <option value="merge">追加・更新のみ</option>
+            <option value="replace">CSV の内容に置き換える</option>
+          </select></label>
+      </div>
+      <div id="di-result" style="margin-top:10px"></div>
+      <div class="actions"><button data-close>閉じる</button><button id="di-check">内容を確認</button><button class="primary" id="di-run">取込</button></div>`, {
+      onOpen(bg) {
+        const res = $('#di-result', bg);
+        const send = async (dry) => {
+          const f = $('#di-file', bg).files[0];
+          if (!f) { toast('CSV ファイルを選択してください', true); return; }
+          const fd = new FormData();
+          fd.append('file', f);
+          res.innerHTML = '処理中...';
+          try {
+            const mode = $('#di-mode', bg).value;
+            const r = await api('POST', `/api/clients/${S.client.id}/import/descriptions?mode=${mode}&dry_run=${dry}`, fd);
+            res.innerHTML = `<span class="badge ok">${dry ? '確認' : '取込完了'}</span>
+              追加 ${r.created} / 更新 ${r.updated} / 削除 ${r.deleted}${r.kept ? ` / 変更なし ${r.kept}` : ''}`;
+            if (!dry) {
+              await loadDescriptions();
+              rows = snapshot();
+              clearDirty();
+              draw();
+              toast(`摘要を取り込みました (追加 ${r.created} / 更新 ${r.updated})`);
+            }
+          } catch (e) { res.innerHTML = `<span class="badge danger">エラー</span> ${esc(e.message)}`; }
+        };
+        $('#di-check', bg).onclick = () => send(true);
+        $('#di-run', bg).onclick = async () => {
+          if (await confirmDialog('CSV の内容で摘要を更新します。よろしいですか？')) await send(false);
+        };
+      },
+    });
+  };
+
+  $('#d-q').oninput = draw;
+  const warnUnsaved = (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } };
+  window.addEventListener('beforeunload', warnUnsaved);
+  rows = snapshot();
+  draw();
+  return () => window.removeEventListener('beforeunload', warnUnsaved);
+};
+
 // ---------------------------------------------------------------- 部門
 routes.departments = async function (main) {
   main.innerHTML = `<h2>部門</h2>

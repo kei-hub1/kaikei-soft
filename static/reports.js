@@ -60,6 +60,8 @@ routes.journal = async function (main, params) {
     ${periodToolbar('j', { from: params.from, to: params.to })}
     <div class="field"><span>科目</span>${accountSelectHtml('j-acct')}</div>
     <div class="field"><span>摘要検索</span><input id="j-q" style="width:160px"></div>
+    <div class="field"><span>並び順</span><select id="j-sort">
+      <option value="date">日付順</option><option value="description">摘要順</option></select></div>
     <button id="j-run" class="primary">表示</button>
     ${printButton()} ${csvButton('j-csv')}
   </div>
@@ -68,18 +70,34 @@ routes.journal = async function (main, params) {
     <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th>${exempt ? '' : '<th>税区分</th><th>内消費税</th>'}<th>摘要</th>
   </tr></thead><tbody></tbody></table></div></div>`;
   if (params.account) $('#j-acct').value = params.account;
+  if (params.q) $('#j-q').value = params.q;
+  if (params.sort) $('#j-sort').value = params.sort;
 
   async function run() {
-    const qs = new URLSearchParams({ fiscal_year_id: S.fy.id, date_from: $('#j-from').value, date_to: $('#j-to').value, limit: 5000 });
+    const sort = $('#j-sort').value;
+    const qs = new URLSearchParams({ fiscal_year_id: S.fy.id, date_from: $('#j-from').value, date_to: $('#j-to').value, limit: 5000, sort });
     if ($('#j-acct').value) qs.set('account_id', $('#j-acct').value);
     if ($('#j-q').value.trim()) qs.set('q', $('#j-q').value.trim());
     const r = await GET(`/api/clients/${S.client.id}/entries?${qs}`);
-    $('#j-title').innerHTML = reportHeader('仕訳帳', `${fmtDate($('#j-from').value)} 〜 ${fmtDate($('#j-to').value)}　${r.total} 伝票`);
+    $('#j-title').innerHTML = reportHeader('仕訳帳', `${fmtDate($('#j-from').value)} 〜 ${fmtDate($('#j-to').value)}　${r.total} 伝票${sort === 'description' ? '　摘要順' : ''}`);
     let total = 0;
     const rows = [];
+    // 摘要順のときは、摘要が変わる位置に小計を挟む
+    let curDesc = null, grpDr = 0, grpCount = 0;
+    const flush = () => {
+      if (curDesc === null || !grpCount) return;
+      rows.push(`<tr class="subtotal"><td colspan="6">${esc(curDesc || '(摘要なし)')} 小計 (${grpCount} 行)</td>
+        <td class="num">${fmt(grpDr)}</td><td colspan="${exempt ? 1 : 3}"></td></tr>`);
+      grpDr = 0; grpCount = 0;
+    };
     for (const e of r.entries) {
+      if (sort === 'description') {
+        const d = (e.lines.find(l => l.description) || {}).description || '';
+        if (d !== curDesc) { flush(); curDesc = d; }
+      }
       e.lines.forEach((l, i) => {
-        if (l.debit_account_id) total += l.amount;
+        if (l.debit_account_id) { total += l.amount; grpDr += l.amount; }
+        grpCount++;
         rows.push(`<tr class="clickable" data-id="${e.id}">
           <td class="code">${i === 0 ? fmtDate(e.entry_date) : ''}</td><td class="num">${i === 0 ? e.voucher_no : ''}</td>
           <td>${l.debit_code ? esc(l.debit_code + ' ' + l.debit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.debit_sub_name || '')}</td>
@@ -89,10 +107,12 @@ routes.journal = async function (main, params) {
           <td>${esc(l.description)}${e.memo && i === 0 ? ` <span class="muted">[${esc(e.memo)}]</span>` : ''}</td></tr>`);
       });
     }
+    flush();
     rows.push(`<tr class="total"><td colspan="6">合計</td><td class="num">${fmt(total)}</td><td colspan="${exempt ? 1 : 3}"></td></tr>`);
     $('#j-table tbody').innerHTML = rows.join('');
   }
   $('#j-run').onclick = run;
+  $('#j-sort').onchange = run;
   $('#j-q').onkeydown = (e) => { if (e.key === 'Enter') run(); };
   $('#j-acct').onchange = run;
   bindMonthSelect('j', run);
@@ -111,6 +131,8 @@ routes.ledger = async function (main, params) {
     <div class="field"><span>勘定科目</span><input id="l-acct" style="width:220px" placeholder="コード・かな・名称"></div>
     <div class="field"><span>補助科目</span><select id="l-sub"><option value="">(科目合計)</option></select></div>
     ${periodToolbar('l', { from: params.from, to: params.to })}
+    <div class="field"><span>並び順</span><select id="l-sort">
+      <option value="date">日付順</option><option value="description">摘要順</option></select></div>
     <button id="l-prev" title="前の科目">◀</button><button id="l-next" title="次の科目">▶</button>
     ${printButton()} ${csvButton('l-csv')}
   </div>
@@ -126,21 +148,39 @@ routes.ledger = async function (main, params) {
   }
   async function run() {
     if (!acctCombo.id) { $('#l-table tbody').innerHTML = '<tr><td colspan="8" class="empty">科目を選択してください</td></tr>'; return; }
-    const qs = new URLSearchParams({ account_id: acctCombo.id, date_from: $('#l-from').value, date_to: $('#l-to').value });
+    const sort = $('#l-sort').value;
+    const qs = new URLSearchParams({ account_id: acctCombo.id, date_from: $('#l-from').value, date_to: $('#l-to').value, sort });
     if (subSel.value) qs.set('sub_id', subSel.value);
     const r = await GET(`/api/fiscal-years/${S.fy.id}/reports/ledger?${qs}`);
     const a = r.account;
     $('#l-title').innerHTML = reportHeader(`${subSel.value ? '補助元帳' : '総勘定元帳'}　${a.code} ${a.name}${r.sub ? ' / ' + r.sub.name : ''}`,
-      `${fmtDate($('#l-from').value)} 〜 ${fmtDate($('#l-to').value)}`);
-    const rows = [`<tr class="subtotal"><td colspan="5">前期繰越 / 期間前残高</td><td></td><td></td>${fmtCell0(r.opening)}</tr>`];
+      `${fmtDate($('#l-from').value)} 〜 ${fmtDate($('#l-to').value)}${sort === 'description' ? '　摘要順' : ''}`);
+    const byDesc = sort === 'description';
+    // 摘要順では残高欄が意味を持たないので出さず、代わりに摘要ごとの小計を挟む
+    $('#l-table thead th:last-child').textContent = byDesc ? '' : '残高';
+    const rows = byDesc ? []
+      : [`<tr class="subtotal"><td colspan="5">前期繰越 / 期間前残高</td><td></td><td></td>${fmtCell0(r.opening)}</tr>`];
+    let curDesc = null;
+    const groupOf = (d) => (r.groups || []).find(g => g.description === d);
     for (const x of r.rows) {
+      if (byDesc && x.description !== curDesc) {
+        if (curDesc !== null) {
+          const g = groupOf(curDesc);
+          if (g) rows.push(`<tr class="subtotal"><td colspan="5">${esc(curDesc || '(摘要なし)')} 小計 (${g.count} 件)</td>${fmtCell0(g.debit)}${fmtCell0(g.credit)}<td></td></tr>`);
+        }
+        curDesc = x.description;
+      }
       rows.push(`<tr class="clickable" data-id="${x.entry_id}">
         <td class="code">${fmtDate(x.date)}</td><td class="num">${x.voucher_no}</td>
         <td>${x.counter_code ? esc(x.counter_code + ' ' + x.counter_name) : '<span class="muted">諸口</span>'}</td><td>${esc(x.counter_sub)}</td>
         <td>${esc(x.description)}${x.is_tax_split ? ' <span class="badge">消費税</span>' : ''}${x.sub_name && !subSel.value ? ` <span class="muted">(${esc(x.sub_name)})</span>` : ''}</td>
-        ${fmtCell(x.debit)}${fmtCell(x.credit)}${fmtCell0(x.balance)}</tr>`);
+        ${fmtCell(x.debit)}${fmtCell(x.credit)}${byDesc ? '<td></td>' : fmtCell0(x.balance)}</tr>`);
     }
-    rows.push(`<tr class="total"><td colspan="5">期間合計 / 残高</td>${fmtCell0(r.total_debit)}${fmtCell0(r.total_credit)}${fmtCell0(r.closing)}</tr>`);
+    if (byDesc && curDesc !== null) {
+      const g = groupOf(curDesc);
+      if (g) rows.push(`<tr class="subtotal"><td colspan="5">${esc(curDesc || '(摘要なし)')} 小計 (${g.count} 件)</td>${fmtCell0(g.debit)}${fmtCell0(g.credit)}<td></td></tr>`);
+    }
+    rows.push(`<tr class="total"><td colspan="5">期間合計${byDesc ? '' : ' / 残高'}</td>${fmtCell0(r.total_debit)}${fmtCell0(r.total_credit)}${byDesc ? '<td></td>' : fmtCell0(r.closing)}</tr>`);
     $('#l-table tbody').innerHTML = rows.join('');
   }
   function step(dir) {
@@ -152,6 +192,7 @@ routes.ledger = async function (main, params) {
   $('#l-prev').onclick = () => step(-1);
   $('#l-next').onclick = () => step(1);
   subSel.onchange = run;
+  $('#l-sort').onchange = run;
   bindMonthSelect('l', run);
   $('#l-csv').onclick = () => tableToCsv($('#l-table'), `元帳_${S.client.code}.csv`);
   $('#l-table').addEventListener('click', (e) => {
@@ -360,4 +401,63 @@ routes.fs = async function (main, params) {
   }
   $('#f-to').onchange = run;
   await run();
+};
+
+// ---------------------------------------------------------------- 摘要別集計
+routes.descsum = async function (main, params) {
+  main.innerHTML = `<h2>摘要別集計</h2>
+  <div class="toolbar no-print">
+    ${periodToolbar('s', { from: params.from, to: params.to })}
+    <div class="field"><span>科目</span>${accountSelectHtml('s-acct')}</div>
+    <div class="field"><span>検索</span><input id="s-q" style="width:160px" placeholder="摘要"></div>
+    <div class="field"><span>並び順</span><select id="s-sort">
+      <option value="description">摘要順</option><option value="count">件数の多い順</option>
+      <option value="debit">借方の大きい順</option><option value="credit">貸方の大きい順</option></select></div>
+    ${printButton()} ${csvButton('s-csv')}
+  </div>
+  <div class="panel"><div id="s-title"></div>
+  <div class="scroll-x"><table class="grid compact sticky-head" id="s-table"><thead><tr>
+    <th>摘要</th><th>件数</th><th>借方</th><th>貸方</th><th>差引</th><th>科目</th><th>期間</th>
+  </tr></thead><tbody></tbody></table></div>
+  <p class="help">摘要が同じ取引をまとめた集計です。売上先・仕入先を摘要に書いている場合の取引先別の確認に使えます。
+  行をクリックすると、その摘要の仕訳だけを仕訳帳で表示します。</p></div>`;
+  if (params.account) $('#s-acct').value = params.account;
+
+  let data = null;
+  async function load() {
+    const qs = new URLSearchParams({ date_from: $('#s-from').value, date_to: $('#s-to').value });
+    if ($('#s-acct').value) qs.set('account_id', $('#s-acct').value);
+    data = await GET(`/api/fiscal-years/${S.fy.id}/reports/description-summary?${qs}`);
+    draw();
+  }
+  function draw() {
+    const q = $('#s-q').value.trim().toLowerCase();
+    const sort = $('#s-sort').value;
+    let rows = data.rows.filter(r => !q || (r.description || '').toLowerCase().includes(q));
+    if (sort === 'count') rows = rows.slice().sort((a, b) => b.count - a.count);
+    else if (sort === 'debit') rows = rows.slice().sort((a, b) => b.debit - a.debit);
+    else if (sort === 'credit') rows = rows.slice().sort((a, b) => b.credit - a.credit);
+    $('#s-title').innerHTML = reportHeader('摘要別集計',
+      `${fmtDate(data.date_from)} 〜 ${fmtDate(data.date_to)}　${rows.length} 種類 / ${data.total_count} 行`
+      + (data.account ? `　${data.account.code} ${data.account.name}` : ''));
+    const out = rows.map(r => `<tr class="clickable" data-desc="${esc(r.description)}">
+      <td>${r.description ? esc(r.description) : '<span class="muted">(摘要なし)</span>'}</td>
+      <td class="num">${r.count}</td>${fmtCell(r.debit)}${fmtCell(r.credit)}${fmtCell0(r.net)}
+      <td class="muted">${esc(r.accounts.join(', '))}${r.account_count > r.accounts.length ? ' ほか' : ''}</td>
+      <td class="code muted">${fmtDate(r.first_date)}〜${fmtDate(r.last_date)}</td></tr>`);
+    out.push(`<tr class="total"><td>合計</td><td class="num">${data.total_count}</td>
+      ${fmtCell0(data.total_debit)}${fmtCell0(data.total_credit)}${fmtCell0(data.total_debit - data.total_credit)}<td></td><td></td></tr>`);
+    $('#s-table tbody').innerHTML = out.join('') || '<tr><td colspan="7" class="empty">データがありません</td></tr>';
+  }
+  bindMonthSelect('s', load);
+  $('#s-acct').onchange = load;
+  $('#s-q').oninput = () => draw();
+  $('#s-sort').onchange = () => draw();
+  $('#s-csv').onclick = () => tableToCsv($('#s-table'), `摘要別集計_${S.client.code}.csv`);
+  $('#s-table').addEventListener('click', (e) => {
+    const tr = e.target.closest('tr[data-desc]');
+    if (!tr) return;
+    navigate('journal', { from: $('#s-from').value, to: $('#s-to').value, q: tr.dataset.desc, sort: 'description' });
+  });
+  await load();
 };

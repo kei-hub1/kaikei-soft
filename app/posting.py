@@ -155,6 +155,17 @@ def opening_balances(conn: sqlite3.Connection, fiscal_year_id: int) -> dict[tupl
     return {(r["account_id"], r["sub_account_id"]): r["amount"] for r in rows}
 
 
+def description_kana(conn: sqlite3.Connection, client_id: int) -> dict[str, str]:
+    """摘要プリセットの「かな」。摘要順の並べ替えで五十音順にするために使う。"""
+    return {r["text"]: r["kana"] for r in conn.execute(
+        "SELECT text, kana FROM descriptions WHERE client_id=? AND kana<>''", (client_id,)).fetchall()}
+
+
+def description_sort_key(kana: dict[str, str]):
+    """摘要の並び替えキー。かなが登録されていれば五十音順、摘要なしは最後。"""
+    return lambda d: (d == "", kana.get(d, d), d)
+
+
 def signed(p: Posting) -> int:
     return p.amount if p.side == "D" else -p.amount
 
@@ -266,8 +277,12 @@ def trial_balance(conn: sqlite3.Connection, fiscal_year_id: int, date_from: str,
 
 
 def ledger(conn: sqlite3.Connection, fiscal_year_id: int, account_id: int, date_from: str, date_to: str,
-           sub_id: int | None = None) -> dict:
-    """総勘定元帳 / 補助元帳。"""
+           sub_id: int | None = None, sort: str = "date") -> dict:
+    """総勘定元帳 / 補助元帳。
+
+    sort="description" にすると摘要順に並べ替え、同じ摘要ごとに小計を付ける。
+    残高欄は日付順に積み上げた金額なので、摘要順のときは意味を持たないため出さない。
+    """
     fy = conn.execute("SELECT * FROM fiscal_years WHERE id=?", (fiscal_year_id,)).fetchone()
     accts = accounts_map(conn, fy["client_id"])
     subs = sub_accounts_map(conn, fy["client_id"])
@@ -311,12 +326,79 @@ def ledger(conn: sqlite3.Connection, fiscal_year_id: int, account_id: int, date_
             "balance": bal if ns == "D" else -bal,
             "is_tax_split": p.is_tax_split,
         })
+    groups = []
+    if sort == "description":
+        # 摘要ごとにまとめ、各グループの小計を添える
+        by_desc: dict[str, list] = {}
+        for r in out:
+            by_desc.setdefault(r["description"], []).append(r)
+        ordered = []
+        key = description_sort_key(description_kana(conn, fy["client_id"]))
+        for desc in sorted(by_desc, key=key):
+            rows_of = by_desc[desc]
+            ordered.extend(rows_of)
+            groups.append({
+                "description": desc, "count": len(rows_of),
+                "debit": sum(x["debit"] for x in rows_of),
+                "credit": sum(x["credit"] for x in rows_of),
+            })
+        out = ordered
+
     return {
         "account": acc, "sub": subs.get(sub_id) if sub_id else None, "normal_side": ns,
         "opening": opening if ns == "D" else -opening,
         "total_debit": tot_d, "total_credit": tot_c,
         "closing": bal if ns == "D" else -bal,
+        "sort": sort, "groups": groups,
         "rows": out,
+    }
+
+
+def description_summary(conn: sqlite3.Connection, fiscal_year_id: int, date_from: str, date_to: str,
+                        account_id: int | None = None) -> dict:
+    """摘要別集計。同じ摘要の取引をまとめ、件数と借方・貸方の合計を出す。
+
+    売上先や仕入先を摘要に書いている場合に、取引先ごとの残高確認に使える。
+    """
+    postings = fetch_postings(conn, fiscal_year_id, date_from, date_to)
+    fy = conn.execute("SELECT * FROM fiscal_years WHERE id=?", (fiscal_year_id,)).fetchone()
+    accts = accounts_map(conn, fy["client_id"])
+    agg: dict[str, dict] = {}
+    for p in postings:
+        if account_id and p.account_id != account_id:
+            continue
+        a = agg.setdefault(p.description, {
+            "description": p.description, "count": 0, "debit": 0, "credit": 0,
+            "accounts": {}, "first_date": p.entry_date, "last_date": p.entry_date,
+        })
+        a["count"] += 1
+        if p.side == "D":
+            a["debit"] += p.amount
+        else:
+            a["credit"] += p.amount
+        acc = accts.get(p.account_id)
+        if acc:
+            a["accounts"][acc["code"]] = acc["name"]
+        a["first_date"] = min(a["first_date"], p.entry_date)
+        a["last_date"] = max(a["last_date"], p.entry_date)
+
+    rows = []
+    for a in agg.values():
+        rows.append({
+            **{k: v for k, v in a.items() if k != "accounts"},
+            "net": a["debit"] - a["credit"],
+            "accounts": [f"{c} {n}" for c, n in sorted(a["accounts"].items())][:6],
+            "account_count": len(a["accounts"]),
+        })
+    key = description_sort_key(description_kana(conn, fy["client_id"]))
+    rows.sort(key=lambda r: key(r["description"]))
+    return {
+        "date_from": date_from, "date_to": date_to,
+        "account": accts.get(account_id) if account_id else None,
+        "rows": rows,
+        "total_debit": sum(r["debit"] for r in rows),
+        "total_credit": sum(r["credit"] for r in rows),
+        "total_count": sum(r["count"] for r in rows),
     }
 
 

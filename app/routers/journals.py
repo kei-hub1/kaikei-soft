@@ -137,8 +137,25 @@ LEFT JOIN departments cd ON cd.id=l.credit_dept_id
 """
 
 
-def _load_entries(conn, where: str, params: list, limit: int | None = None, offset: int = 0) -> list[dict]:
-    sql = ENTRY_SELECT + " WHERE " + where + " ORDER BY e.entry_date, e.voucher_no"
+_DESC_EXPR = ("(SELECT MIN(l.description) FROM journal_lines l "
+              "WHERE l.entry_id=e.id AND l.description<>'')")
+# 摘要プリセットに「かな」があればそれを並び替えキーに使い、五十音順に並べる。
+# 無ければ摘要そのものの文字コード順。
+_DESC_SORT_KEY = (f"COALESCE((SELECT NULLIF(d.kana,'') FROM descriptions d "
+                  f"WHERE d.client_id=e.client_id AND d.text={_DESC_EXPR}), {_DESC_EXPR})")
+
+# 一覧の並び順。摘要順は、同じ摘要の取引をまとめて確認するための並び。
+ENTRY_ORDERS = {
+    "date": "e.entry_date, e.voucher_no",
+    # 摘要なしの伝票 (副問い合わせが NULL) は最後に置く
+    "description": (f"{_DESC_EXPR} IS NULL, {_DESC_SORT_KEY}, {_DESC_EXPR}, e.entry_date, e.voucher_no"),
+}
+
+
+def _load_entries(conn, where: str, params: list, limit: int | None = None, offset: int = 0,
+                  sort: str = "date") -> list[dict]:
+    order = ENTRY_ORDERS.get(sort, ENTRY_ORDERS["date"])
+    sql = ENTRY_SELECT + " WHERE " + where + " ORDER BY " + order
     if limit:
         sql += f" LIMIT {int(limit)} OFFSET {int(offset)}"
     entries = [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -166,6 +183,8 @@ def list_entries(
     account_id: int | None = None,
     sub_id: int | None = None,
     q: str | None = None,
+    description: str | None = None,
+    sort: str = "date",
     limit: int = Query(default=500, le=5000),
     offset: int = 0,
 ):
@@ -189,8 +208,14 @@ def list_entries(
     if q:
         where.append("(e.memo LIKE ? OR EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id=e.id AND l.description LIKE ?))")
         params += [f"%{q}%", f"%{q}%"]
+    if description:
+        # 摘要の完全一致 (同じ摘要の取引だけを抜き出す)
+        where.append("EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id=e.id AND l.description=?)")
+        params.append(description)
+    if sort not in ENTRY_ORDERS:
+        raise HTTPException(400, "sort は date / description のいずれか")
     with db() as conn:
-        entries = _load_entries(conn, " AND ".join(where), params, limit, offset)
+        entries = _load_entries(conn, " AND ".join(where), params, limit, offset, sort)
         total = conn.execute("SELECT COUNT(*) FROM journal_entries e WHERE " + " AND ".join(where), params).fetchone()[0]
         return {"entries": entries, "total": total}
 

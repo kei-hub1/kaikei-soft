@@ -48,7 +48,7 @@ routes.entry = async function (main, params) {
     </div>
     <div class="help">
       <kbd>Enter</kbd> 次の項目 / <kbd>Shift+Enter</kbd> 前の項目 / 科目はコード・かな・名称で検索 <kbd>↑↓</kbd> で選択 /
-      金額欄で空欄のまま <kbd>Enter</kbd> → 差額を入力 / 摘要欄で <kbd>Enter</kbd> → 貸借一致なら登録、不一致なら行追加 / <kbd>Ctrl+Del</kbd> 行削除
+      金額欄で空欄のまま <kbd>Enter</kbd> → 差額を入力 / 摘要欄で <kbd>Enter</kbd> → 貸借一致なら登録、不一致なら行追加 / <kbd>Ctrl+Del</kbd> 行削除 / 摘要は <kbd>F4</kbd> または入力で候補表示、コード入力 + <kbd>Enter</kbd> で展開
     </div>
   </div>
   <div class="panel">
@@ -208,14 +208,24 @@ routes.entry = async function (main, params) {
       });
     }
     const desc = f('desc');
+    // 摘要はプリセットから選べるが、候補に無い文字列もそのまま入力できる
+    const descSuggest = makeSuggest(desc, {
+      items: () => S.descriptionItems,
+      accountIds: () => [dr.id, cr.id],
+    });
+    tr._descSuggest = descSuggest;
     desc.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
+        descSuggest.resolve();       // 候補を選んでいれば本文に、コード入力なら展開
         const rows = $$('tr', tbody);
         if (tr !== rows[rows.length - 1]) { focusNext(desc); return; }
         const t = computeTotals();
         if (t.dr > 0 && t.diff === 0) save();
         else { addLine({}, true); }
+      } else if (e.key === 'F4') {
+        e.preventDefault();
+        descSuggest.open();
       }
     });
     f('del').addEventListener('click', () => removeLine(tr));
@@ -334,7 +344,7 @@ routes.entry = async function (main, params) {
     const t = e.target;
     if (!t.dataset || !t.dataset.f) return;
     if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); e.stopPropagation(); focusPrev(t); return; }
-    if (e.key === 'Enter' && !e.ctrlKey && t.tagName === 'INPUT' && !t._combo && t.dataset.f === 'desc') return; // desc 側で処理
+    if (e.key === 'Enter' && !e.ctrlKey && t.dataset.f === 'desc') return; // desc 側で処理
     if (e.key === 'Delete' && e.ctrlKey) { e.preventDefault(); removeLine(t.closest('tr')); }
   }, true);
 

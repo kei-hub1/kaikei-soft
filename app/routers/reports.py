@@ -24,10 +24,23 @@ def trial_balance(fy_id: int, date_from: str | None = None, date_to: str | None 
 
 
 @router.get("/fiscal-years/{fy_id}/reports/ledger")
-def ledger(fy_id: int, account_id: int, date_from: str | None = None, date_to: str | None = None, sub_id: int | None = None):
+def ledger(fy_id: int, account_id: int, date_from: str | None = None, date_to: str | None = None,
+           sub_id: int | None = None, sort: str = "date"):
+    if sort not in ("date", "description"):
+        raise HTTPException(400, "sort は date / description のいずれか")
     with db() as conn:
         fy = _fy(conn, fy_id)
-        return posting.ledger(conn, fy_id, account_id, date_from or fy["start_date"], date_to or fy["end_date"], sub_id)
+        return posting.ledger(conn, fy_id, account_id, date_from or fy["start_date"], date_to or fy["end_date"],
+                              sub_id, sort)
+
+
+@router.get("/fiscal-years/{fy_id}/reports/description-summary")
+def description_summary(fy_id: int, date_from: str | None = None, date_to: str | None = None,
+                        account_id: int | None = None):
+    with db() as conn:
+        fy = _fy(conn, fy_id)
+        return posting.description_summary(conn, fy_id, date_from or fy["start_date"],
+                                           date_to or fy["end_date"], account_id)
 
 
 @router.get("/fiscal-years/{fy_id}/reports/monthly")
