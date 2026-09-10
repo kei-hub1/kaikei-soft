@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>財務エントリ</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="header">
+  <span class="brand">財務エントリ</span>
+  <label>顧問先 <select id="sel-client"></select></label>
+  <label>会計期間 <select id="sel-fy"></select></label>
+  <span id="client-badges"></span>
+  <span class="spacer"></span>
+  <span class="hint" id="header-hint"></span>
+</div>
+<div id="nav">
+  <a href="#/entry" data-route="entry">仕訳入力</a>
+  <a href="#/journal" data-route="journal">仕訳帳</a>
+  <a href="#/ledger" data-route="ledger">総勘定元帳</a>
+  <span class="sep"></span>
+  <a href="#/tb" data-route="tb">残高試算表</a>
+  <a href="#/monthly" data-route="monthly">月次推移表</a>
+  <a href="#/tax" data-route="tax">消費税集計表</a>
+  <a href="#/fs" data-route="fs">決算書</a>
+  <span class="sep"></span>
+  <a href="#/accounts" data-route="accounts">勘定科目</a>
+  <a href="#/departments" data-route="departments">部門</a>
+  <a href="#/templates" data-route="templates">定型仕訳</a>
+  <a href="#/opening" data-route="opening">期首残高</a>
+  <span class="sep"></span>
+  <a href="#/clients" data-route="clients">顧問先・会計期間</a>
+  <a href="#/data" data-route="data">データ管理</a>
+</div>
+<div id="main"></div>
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+<script src="/static/combo.js"></script>
+<script src="/static/entry.js"></script>
+<script src="/static/reports.js"></script>
+<script src="/static/masters.js"></script>
+<script src="/static/boot.js"></script>
+</body>
+</html>
