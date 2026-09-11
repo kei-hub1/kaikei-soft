@@ -1,15 +1,20 @@
-/* 仕訳入力画面 */
+/* 仕訳入力フォーム
+
+   「仕訳入力」画面と、帳票 (総勘定元帳・仕訳帳) から開く修正ダイアログで
+   同じフォームを使う。createEntryForm() が中身を作り、routes.entry は
+   それを画面に置いたもの、openEntryDialog() はダイアログに置いたもの。 */
 'use strict';
 
-routes.entry = async function (main, params) {
+function createEntryForm(root, opts = {}) {
+  const inDialog = !!opts.inDialog;
+  const onChanged = opts.onChanged || (async () => {});
   const hasDept = S.departments.some(d => d.active);
   const exempt = isExempt();
   let editingId = null;      // 修正中の伝票 id
   let editingVno = null;
-  let listMode = localStorage.getItem('entryListMode') || 'date';
   let lastSaved = null;
 
-  main.innerHTML = `
+  root.innerHTML = `
   <div class="panel" id="entry-form">
     <div class="head">
       <div class="field"><span>日付 (月日 例: 0401)</span>
@@ -17,7 +22,7 @@ routes.entry = async function (main, params) {
       <div class="field"><span>伝票No</span><input id="e-vno" class="num" style="width:70px" readonly></div>
       <div class="field"><span>伝票メモ</span><input id="e-memo" style="width:200px"></div>
       <button id="e-template" title="定型仕訳を呼び出す">定型仕訳 <kbd>F2</kbd></button>
-      <button id="e-copy" title="直前に登録した伝票を複写">前伝票複写 <kbd>F5</kbd></button>
+      ${inDialog ? '' : '<button id="e-copy" title="直前に登録した伝票を複写">前伝票複写 <kbd>F5</kbd></button>'}
       <div class="status" id="e-status"></div>
     </div>
     <table class="entry-grid">
@@ -41,45 +46,32 @@ routes.entry = async function (main, params) {
       <div class="totals">借方 <b id="t-dr">0</b>　貸方 <b id="t-cr">0</b>　差額 <b id="t-diff" class="diff">0</b></div>
       <div class="actions">
         <button id="e-addrow">行追加 <kbd>Ctrl+Ins</kbd></button>
-        <button id="e-clear">クリア <kbd>Esc</kbd></button>
+        ${inDialog ? '' : '<button id="e-clear">クリア <kbd>Esc</kbd></button>'}
         <button id="e-delete" class="danger" style="display:none">この伝票を削除</button>
-        <button id="e-save" class="primary">登録 <kbd>Ctrl+Enter</kbd></button>
+        <button id="e-save" class="primary">${inDialog ? '修正を保存' : '登録'} <kbd>Ctrl+Enter</kbd></button>
       </div>
     </div>
     <div class="help">
       <kbd>Enter</kbd> 次の項目 / <kbd>Shift+Enter</kbd> 前の項目 / 科目はコード・かな・名称で検索 <kbd>↑↓</kbd> で選択 /
-      金額欄で空欄のまま <kbd>Enter</kbd> → 差額を入力 / 摘要欄で <kbd>Enter</kbd> → 貸借一致なら登録、不一致なら行追加 / <kbd>Ctrl+Del</kbd> 行削除 / 摘要は <kbd>F4</kbd> または入力で候補表示、コード入力 + <kbd>Enter</kbd> で展開
+      金額欄で空欄のまま <kbd>Enter</kbd> → 差額を入力 / 摘要欄で <kbd>Enter</kbd> → 貸借一致なら${inDialog ? '保存' : '登録'}、不一致なら行追加 /
+      <kbd>Ctrl+Del</kbd> 行削除 / 摘要は <kbd>F4</kbd> または入力で候補表示、コード入力 + <kbd>Enter</kbd> で展開
+      ${inDialog ? '/ <kbd>Esc</kbd> 閉じる' : ''}
     </div>
-  </div>
-  <div class="panel">
-    <div class="row between">
-      <h3 style="margin:0">登録済み仕訳</h3>
-      <div class="row">
-        <select id="list-mode">
-          <option value="date">入力日付の仕訳</option>
-          <option value="recent">直近 50 件</option>
-          <option value="month">入力月の仕訳</option>
-        </select>
-        <span id="list-summary" class="muted"></span>
-      </div>
-    </div>
-    <div class="scroll-x"><table class="grid compact" id="e-list"><thead><tr>
-      <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th>${exempt ? '' : '<th>税</th>'}<th>摘要</th><th></th>
-    </tr></thead><tbody></tbody></table></div>
   </div>`;
 
-  const tbody = $('#e-lines');
-  const dateInput = $('#e-date');
-  const memoInput = $('#e-memo');
+  const q = (sel) => $(sel, root);
+  const tbody = q('#e-lines');
+  const dateInput = q('#e-date');
+  const memoInput = q('#e-memo');
   let currentDate = sessionStorage.getItem('entryDate:' + S.fy.id) || (S.fy.start_date <= today() && today() <= S.fy.end_date ? today() : S.fy.start_date);
 
   // ---------------------------------------------------------------- 日付
   function setDate(iso) {
     currentDate = iso;
     dateInput.value = iso;
-    $('#e-date-disp').textContent = fmtDate(iso).slice(0) + ' ' + ['日', '月', '火', '水', '木', '金', '土'][new Date(iso).getDay()];
-    sessionStorage.setItem('entryDate:' + S.fy.id, iso);
-    $('#e-date-disp').classList.toggle('neg', iso < S.fy.start_date || iso > S.fy.end_date);
+    q('#e-date-disp').textContent = fmtDate(iso).slice(0) + ' ' + ['日', '月', '火', '水', '木', '金', '土'][new Date(iso).getDay()];
+    if (!inDialog) sessionStorage.setItem('entryDate:' + S.fy.id, iso);
+    q('#e-date-disp').classList.toggle('neg', iso < S.fy.start_date || iso > S.fy.end_date);
   }
   function commitDate() {
     const iso = parseDateInput(dateInput.value, S.fy);
@@ -312,9 +304,9 @@ routes.entry = async function (main, params) {
   }
   function updateTotals() {
     const t = computeTotals();
-    $('#t-dr').textContent = fmt(t.dr);
-    $('#t-cr').textContent = fmt(t.cr);
-    const d = $('#t-diff');
+    q('#t-dr').textContent = fmt(t.dr);
+    q('#t-cr').textContent = fmt(t.cr);
+    const d = q('#t-diff');
     d.textContent = fmt(t.diff);
     d.className = 'diff ' + (t.diff === 0 ? 'ok' : 'ng');
   }
@@ -353,9 +345,9 @@ routes.entry = async function (main, params) {
     editingId = null; editingVno = null;
     tbody.innerHTML = '';
     memoInput.value = '';
-    $('#e-vno').value = '';
-    $('#e-status').innerHTML = '';
-    $('#e-delete').style.display = 'none';
+    q('#e-vno').value = '';
+    q('#e-status').innerHTML = '';
+    q('#e-delete').style.display = 'none';
     addLine({});
     if (!keepDate) setDate(S.fy.start_date);
     updateTotals();
@@ -365,7 +357,7 @@ routes.entry = async function (main, params) {
     const lines = $$('tr', tbody).map(lineData).filter(l => !l.empty);
     if (!lines.length) { toast('仕訳行を入力してください', true); focusFirstLine(); return; }
     const payload = { entry_date: currentDate, memo: memoInput.value.trim(), lines: lines.map(({ empty, ...l }) => l) };
-    const saveBtn = $('#e-save');
+    const saveBtn = q('#e-save');
     saveBtn.disabled = true;
     try {
       let res;
@@ -378,9 +370,11 @@ routes.entry = async function (main, params) {
         toast(`伝票 No.${res.voucher_no} を登録しました`);
       }
       lastSaved = res;
-      resetForm(true);
-      dateInput.focus();
-      await loadList();
+      if (!inDialog) {
+        resetForm(true);
+        dateInput.focus();
+      }
+      await onChanged(res);
     } catch (e) { showError(e); }
     finally { saveBtn.disabled = false; }
   }
@@ -389,22 +383,23 @@ routes.entry = async function (main, params) {
     editingId = entry.id; editingVno = entry.voucher_no;
     setDate(entry.entry_date);
     memoInput.value = entry.memo || '';
-    $('#e-vno').value = entry.voucher_no;
+    q('#e-vno').value = entry.voucher_no;
     for (const l of entry.lines) addLine(l);
-    $('#e-status').innerHTML = `<span class="editing">修正中: 伝票 No.${entry.voucher_no}</span> <button class="small" id="e-cancel-edit">新規入力に戻る</button>`;
-    $('#e-cancel-edit').onclick = () => { resetForm(true); dateInput.focus(); };
-    $('#e-delete').style.display = '';
+    q('#e-status').innerHTML = inDialog ? ''
+      : `<span class="editing">修正中: 伝票 No.${entry.voucher_no}</span> <button class="small" id="e-cancel-edit">新規入力に戻る</button>`;
+    if (q('#e-cancel-edit')) q('#e-cancel-edit').onclick = () => { resetForm(true); dateInput.focus(); };
+    q('#e-delete').style.display = '';
     updateTotals();
     focusFirstLine();
-    window.scrollTo({ top: 0 });
+    if (!inDialog) window.scrollTo({ top: 0 });
   }
   function copyEntry(entry) {
     const wasEditing = editingId;
     tbody.innerHTML = '';
     editingId = null; editingVno = null;
-    $('#e-vno').value = '';
-    $('#e-status').innerHTML = wasEditing ? '' : '<span class="muted">前伝票を複写しました</span>';
-    $('#e-delete').style.display = 'none';
+    q('#e-vno').value = '';
+    q('#e-status').innerHTML = wasEditing ? '' : '<span class="muted">前伝票を複写しました</span>';
+    q('#e-delete').style.display = 'none';
     memoInput.value = entry.memo || '';
     for (const l of entry.lines) addLine(l);
     updateTotals();
@@ -415,17 +410,17 @@ routes.entry = async function (main, params) {
     try {
       await DEL(`/api/entries/${id}`);
       toast(`伝票 No.${vno} を削除しました`);
-      if (editingId === id) resetForm(true);
-      await loadList();
+      if (!inDialog && editingId === id) resetForm(true);
+      await onChanged();
     } catch (e) { showError(e); }
   }
 
-  $('#e-save').onclick = save;
-  $('#e-clear').onclick = () => { resetForm(true); dateInput.focus(); };
-  $('#e-addrow').onclick = () => addLine({}, true);
-  $('#e-delete').onclick = () => { if (editingId) deleteEntry(editingId, editingVno); };
-  $('#e-template').onclick = openTemplatePicker;
-  $('#e-copy').onclick = copyLast;
+  q('#e-save').onclick = save;
+  if (q('#e-clear')) q('#e-clear').onclick = () => { resetForm(true); dateInput.focus(); };
+  q('#e-addrow').onclick = () => addLine({}, true);
+  q('#e-delete').onclick = () => { if (editingId) deleteEntry(editingId, editingVno); };
+  q('#e-template').onclick = openTemplatePicker;
+  if (q('#e-copy')) q('#e-copy').onclick = copyLast;
 
   async function copyLast() {
     let src = lastSaved;
@@ -449,7 +444,7 @@ routes.entry = async function (main, params) {
       <tbody id="tp-body"></tbody></table></div>
       <div class="actions"><span class="muted" style="margin-right:auto"><kbd>↑↓</kbd> 選択 <kbd>Enter</kbd> 適用</span><button data-close>閉じる</button></div>`, {
       onOpen(bg) {
-        const q = $('#tp-q', bg), body = $('#tp-body', bg);
+        const qi = $('#tp-q', bg), body = $('#tp-body', bg);
         let hl = 0;
         const draw = () => {
           body.innerHTML = items.map((t, i) => `<tr data-i="${i}" class="clickable ${i === hl ? 'hl' : ''}">
@@ -475,26 +470,109 @@ routes.entry = async function (main, params) {
           renumber();
           ntr.querySelector('[data-f=amount]').focus();
         };
-        q.oninput = () => {
-          const s = q.value.trim().toLowerCase();
+        qi.oninput = () => {
+          const s = qi.value.trim().toLowerCase();
           items = S.templates.filter(t => !s || t.code.toLowerCase().includes(s) || t.name.toLowerCase().includes(s) || (t.description || '').toLowerCase().includes(s));
           hl = 0; draw();
         };
-        q.onkeydown = (e) => {
+        qi.onkeydown = (e) => {
           if (e.key === 'ArrowDown') { hl = Math.min(hl + 1, items.length - 1); draw(); e.preventDefault(); }
           else if (e.key === 'ArrowUp') { hl = Math.max(hl - 1, 0); draw(); e.preventDefault(); }
           else if (e.key === 'Enter') { e.preventDefault(); if (items[hl]) apply(items[hl]); }
         };
         body.onclick = (e) => { const r = e.target.closest('tr'); if (r) apply(items[Number(r.dataset.i)]); };
         draw();
-        q.focus();
+        qi.focus();
       },
     });
   }
 
+  // ---------------------------------------------------------------- グローバルキー
+  const onKey = (e) => {
+    // 手前に出ているダイアログだけがキー操作を受ける。
+    // 画面に置いたフォームは、ダイアログが開いている間は受け取らない。
+    const modals = $$('.modal-bg');
+    const top = modals.length ? modals[modals.length - 1] : null;
+    if (inDialog ? (!top || !top.contains(root)) : top) return;
+    if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); save(); }
+    else if (e.key === 'Escape') {
+      if (inDialog) return;     // ダイアログはダイアログ側が閉じる
+      if (!document.querySelector('.combo .dropdown.open')) { e.preventDefault(); resetForm(true); dateInput.focus(); }
+    } else if (e.key === 'Insert' && e.ctrlKey) { e.preventDefault(); addLine({}, true); }
+    else if (e.key === 'F2') { e.preventDefault(); openTemplatePicker(); }
+    else if (e.key === 'F5' && !inDialog) { e.preventDefault(); copyLast(); }
+  };
+  document.addEventListener('keydown', onKey);
+
+  setDate(currentDate);
+  resetForm(true);
+
+  return {
+    loadEntry, copyEntry, resetForm, save, deleteEntry, setDate, focusDate: () => dateInput.focus(),
+    get editingId() { return editingId; },
+    get currentDate() { return currentDate; },
+    destroy() { document.removeEventListener('keydown', onKey); },
+  };
+}
+
+/** 帳票の行から、その伝票を直接修正するダイアログを開く。 */
+async function openEntryDialog(entryId, { onChanged } = {}) {
+  let entry;
+  try {
+    entry = await GET(`/api/entries/${entryId}`);
+  } catch (e) { showError(e); return; }
+  if (S.fy && S.fy.closed) { toast('この会計期間は締め切られています', true); return; }
+
+  let form = null;
+  return modal(`<div style="width:min(1180px, 90vw)">
+    <h3 style="margin-bottom:8px">仕訳の修正　<span class="muted" style="font-weight:normal">伝票 No.${entry.voucher_no}　${esc(fmtDate(entry.entry_date))}</span></h3>
+    <div id="ed-host"></div>
+    <div class="actions"><button data-close>閉じる</button></div>
+    <div class="entry-dialog-space"></div>
+  </div>`, {
+    onOpen(bg, closeModal) {
+      form = createEntryForm($('#ed-host', bg), {
+        inDialog: true,
+        async onChanged() {
+          closeModal();
+          if (onChanged) await onChanged();
+        },
+      });
+      form.loadEntry(entry);
+    },
+    onClose() { if (form) form.destroy(); },
+  });
+}
+
+// ---------------------------------------------------------------- 仕訳入力画面
+routes.entry = async function (main, params) {
+  const exempt = isExempt();
+  let listMode = localStorage.getItem('entryListMode') || 'date';
+
+  main.innerHTML = `<div id="entry-host"></div>
+  <div class="panel">
+    <div class="row between">
+      <h3 style="margin:0">登録済み仕訳</h3>
+      <div class="row">
+        <select id="list-mode">
+          <option value="date">入力日付の仕訳</option>
+          <option value="recent">直近 50 件</option>
+          <option value="month">入力月の仕訳</option>
+        </select>
+        <span id="list-summary" class="muted"></span>
+      </div>
+    </div>
+    <div class="scroll-x"><table class="grid compact" id="e-list"><thead><tr>
+      <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th>${exempt ? '' : '<th>税</th>'}<th>摘要</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>`;
+
+  const form = createEntryForm($('#entry-host'), { onChanged: () => loadList() });
+
   // ---------------------------------------------------------------- 一覧
   async function loadList() {
     const qs = new URLSearchParams({ fiscal_year_id: S.fy.id });
+    const currentDate = form.currentDate;
     if (listMode === 'date') { qs.set('date_from', currentDate); qs.set('date_to', currentDate); }
     else if (listMode === 'month') { qs.set('date_from', currentDate.slice(0, 7) + '-01'); qs.set('date_to', currentDate.slice(0, 7) + '-31'); }
     else { qs.set('limit', 5000); }
@@ -522,38 +600,25 @@ routes.entry = async function (main, params) {
     body.onclick = async (e) => {
       const ed = e.target.closest('[data-edit]');
       const dl = e.target.closest('[data-del]');
-      if (dl) { deleteEntry(Number(dl.dataset.del), dl.dataset.vno); return; }
+      if (dl) { form.deleteEntry(Number(dl.dataset.del), dl.dataset.vno); return; }
       const tr = e.target.closest('tr[data-id]');
       if (!tr) return;
       const id = ed ? Number(ed.dataset.edit) : Number(tr.dataset.id);
-      try { loadEntry(await GET(`/api/entries/${id}`)); } catch (err) { showError(err); }
+      try { form.loadEntry(await GET(`/api/entries/${id}`)); } catch (err) { showError(err); }
     };
   }
   $('#list-mode').value = listMode;
   $('#list-mode').onchange = (e) => { listMode = e.target.value; localStorage.setItem('entryListMode', listMode); loadList(); };
-  dateInput.addEventListener('change', () => { if (listMode !== 'recent') loadList(); });
-
-  // ---------------------------------------------------------------- グローバルキー
-  const onKey = (e) => {
-    if (document.querySelector('.modal-bg')) return;
-    if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); save(); }
-    else if (e.key === 'Escape') { if (!document.querySelector('.combo .dropdown.open')) { e.preventDefault(); resetForm(true); dateInput.focus(); } }
-    else if (e.key === 'Insert' && e.ctrlKey) { e.preventDefault(); addLine({}, true); }
-    else if (e.key === 'F2') { e.preventDefault(); openTemplatePicker(); }
-    else if (e.key === 'F5') { e.preventDefault(); copyLast(); }
-  };
-  document.addEventListener('keydown', onKey);
+  $('#e-date').addEventListener('change', () => { if (listMode !== 'recent') loadList(); });
 
   // ---------------------------------------------------------------- 初期化
-  setDate(currentDate);
-  resetForm(true);
   if (params.entry) {
-    try { loadEntry(await GET(`/api/entries/${params.entry}`)); } catch (e) { showError(e); }
+    try { form.loadEntry(await GET(`/api/entries/${params.entry}`)); } catch (e) { showError(e); }
   } else {
-    dateInput.focus();
+    form.focusDate();
   }
   await loadList();
   $('#header-hint').textContent = S.fy.closed ? 'この会計期間は締め切られています (入力不可)' : '';
 
-  return () => { document.removeEventListener('keydown', onKey); $('#header-hint').textContent = ''; };
+  return () => { form.destroy(); $('#header-hint').textContent = ''; };
 };

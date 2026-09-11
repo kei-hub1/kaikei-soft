@@ -66,6 +66,7 @@ routes.journal = async function (main, params) {
     ${printButton()} ${csvButton('j-csv')}
   </div>
   <div class="panel"><div id="j-title"></div>
+  <div class="muted no-print" style="margin:2px 0 4px">行をクリックすると、その仕訳をこの画面のまま修正できます。</div>
   <div class="scroll-x"><table class="grid compact sticky-head" id="j-table"><thead><tr>
     <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th>${exempt ? '' : '<th>税区分</th><th>内消費税</th>'}<th>摘要</th>
   </tr></thead><tbody></tbody></table></div></div>`;
@@ -117,9 +118,10 @@ routes.journal = async function (main, params) {
   $('#j-acct').onchange = run;
   bindMonthSelect('j', run);
   $('#j-csv').onclick = () => tableToCsv($('#j-table'), `仕訳帳_${S.client.code}.csv`);
+  // 行をクリックしたら、その場で修正できるダイアログを開く
   $('#j-table').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-id]');
-    if (tr) navigate('entry', { entry: tr.dataset.id });
+    if (tr) openEntryDialog(Number(tr.dataset.id), { onChanged: run });
   });
   await run();
 };
@@ -137,6 +139,7 @@ routes.ledger = async function (main, params) {
     ${printButton()} ${csvButton('l-csv')}
   </div>
   <div class="panel"><div id="l-title"></div>
+  <div class="muted no-print" style="margin:2px 0 4px">行をクリックすると、その仕訳をこの画面のまま修正できます。</div>
   <div class="scroll-x"><table class="grid compact sticky-head" id="l-table"><thead><tr>
     <th>日付</th><th>No</th><th>相手科目</th><th>相手補助</th><th>摘要</th><th>借方</th><th>貸方</th><th>残高</th>
   </tr></thead><tbody></tbody></table></div></div>`;
@@ -195,9 +198,11 @@ routes.ledger = async function (main, params) {
   $('#l-sort').onchange = run;
   bindMonthSelect('l', run);
   $('#l-csv').onclick = () => tableToCsv($('#l-table'), `元帳_${S.client.code}.csv`);
+  // 行をクリックしたら、その場で修正できるダイアログを開く。
+  // 修正・削除したら元帳を引き直して、残高も新しい内容で表示し直す。
   $('#l-table').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-id]');
-    if (tr) navigate('entry', { entry: tr.dataset.id });
+    if (tr) openEntryDialog(Number(tr.dataset.id), { onChanged: run });
   });
   const init = params.account ? Number(params.account) : (S.accounts.find(a => a.code === '100') || S.accounts[0] || {}).id;
   if (init) { acctCombo.set(init); fillSubs(); }

@@ -223,6 +223,10 @@ table.entry-grid td.act { text-align: center; width: 34px; }
 .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 150; display: flex; align-items: center; justify-content: center; }
 .modal { background: #fff; border-radius: 6px; padding: 16px 20px; min-width: 420px; max-width: 90vw; max-height: 90vh; overflow: auto; box-shadow: 0 10px 30px rgba(0,0,0,.3); }
 .modal h3 { margin-top: 0; }
+/* 帳票から開く仕訳修正ダイアログ。中の入力フォームは枠を重ねない */
+.modal #entry-form { border: none; background: none; padding: 0; margin: 0; }
+/* 科目の候補一覧がダイアログの下端で切れないよう、下に余白を確保する */
+.modal .entry-dialog-space { height: 300px; }
 .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .modal table.grid tr.hl { background: var(--focus); }
 

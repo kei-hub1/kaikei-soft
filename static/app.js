@@ -168,11 +168,25 @@ function showError(e) {
   toast(e && e.message ? e.message : String(e), true);
 }
 
-function modal(html, { onOpen } = {}) {
+function modal(html, { onOpen, onClose } = {}) {
   const bg = el(`<div class="modal-bg"><div class="modal">${html}</div></div>`);
   document.body.appendChild(bg);
-  const close = () => { bg.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    bg.remove();
+    document.removeEventListener('keydown', onKey);
+    if (onClose) onClose();
+  };
+  const onKey = (e) => {
+    if (e.key !== 'Escape') return;
+    // ダイアログが重なっているときは、一番手前のものだけ閉じる
+    const all = $$('.modal-bg');
+    if (all[all.length - 1] !== bg) return;
+    e.stopPropagation();
+    close();
+  };
   document.addEventListener('keydown', onKey);
   bg.addEventListener('mousedown', (e) => { if (e.target === bg) close(); });
   $$('[data-close]', bg).forEach(b => b.addEventListener('click', close));
