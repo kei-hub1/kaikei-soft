@@ -240,3 +240,10 @@ table.entry-grid td.act { text-align: center; width: 34px; }
   .panel { border: none; padding: 0; }
   table.grid th { background: #eee !important; -webkit-print-color-adjust: exact; }
 }
+
+/* 通帳取込: 確認が必要な行 */
+table.grid tbody tr.warnrow { background: var(--warn-bg); }
+table.grid tbody tr.warnrow:hover { background: #fde68a; }
+table.grid td > input[type=date] { width: 100%; border: 1px solid transparent; background: transparent; padding: 2px 4px; font-family: var(--mono); }
+table.grid td > input[type=date]:hover { border-color: var(--border); background: #fff; }
+table.grid td > input[type=date]:focus { background: var(--focus); border-color: var(--accent); outline: none; }

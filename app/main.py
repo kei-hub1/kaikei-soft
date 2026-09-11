@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .db import init_db
-from .routers import clients, io, journals, masters, reports
+from .routers import clients, io, journals, masters, passbooks, reports
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -20,6 +20,7 @@ def create_app() -> FastAPI:
     app.include_router(clients.router)
     app.include_router(journals.router)
     app.include_router(reports.router)
+    app.include_router(passbooks.router)
     app.include_router(io.router)
 
     @app.get("/", include_in_schema=False)
