@@ -1,6 +1,7 @@
 import io
 import os
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -186,7 +187,7 @@ def test_csv_roundtrip(client):
     files = {"file": ("journal.csv", io.BytesIO(r.content), "text/csv")}
     dry = client.post(f"/api/clients/{cl2['id']}/import/journal", params={"dry_run": True}, files=files)
     assert dry.status_code == 200, dry.text
-    assert dry.json() == {"count": 4, "lines": 6, "dry_run": True}
+    assert dry.json() == {"count": 4, "lines": 6, "skipped": 0, "dry_run": True, "skipped_samples": []}
     files = {"file": ("journal.csv", io.BytesIO(r.content), "text/csv")}
     imp = client.post(f"/api/clients/{cl2['id']}/import/journal", files=files)
     assert imp.status_code == 200, imp.text
@@ -820,3 +821,101 @@ def test_new_screens_are_in_the_menu(client):
                          ("templates", "定型仕訳")]:
         assert f'data-route="{route}"' in html, route
         assert label in html, label
+
+
+def _csv_row(date, dcode, ccode, amount, tax="00", desc="", memo="", vno=""):
+    return f"{date},{vno},{dcode},,,,,{ccode},,,,,{amount},{tax},,{desc},{memo}"
+
+
+def _upload_csv(client, cl, lines, dry_run=False):
+    text = "\ufeff日付,伝票番号,借方科目コード,借方科目名,借方補助コード,借方補助名,借方部門コード," \
+           "貸方科目コード,貸方科目名,貸方補助コード,貸方補助名,貸方部門コード,金額,消費税区分,消費税額,摘要,伝票メモ\r\n"
+    text += "\r\n".join(lines) + "\r\n"
+    files = {"file": ("bank.csv", io.BytesIO(text.encode("utf-8")), "text/csv")}
+    r = client.post(f"/api/clients/{cl['id']}/import/journal", params={"dry_run": dry_run}, files=files)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _entries(client, fy):
+    return client.get(f"/api/clients/{fy['client_id']}/entries", params={"fiscal_year_id": fy["id"]}).json()["entries"]
+
+
+def test_csv_import_skips_entries_that_already_exist(client):
+    """同じ通帳履歴を何度取り込んでも、完全に一致する伝票は二重計上しない。"""
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+    rows = [
+        _csv_row(d, "111", "400", 50000, desc="振込 ヤマダ"),
+        _csv_row(d, "617", "111", 3300, tax="21", desc="コンビニ"),
+    ]
+    first = _upload_csv(client, cl, rows)
+    assert (first["count"], first["skipped"]) == (2, 0)
+
+    # 同じファイルをもう一度: 検証でも取込でも全件が登録済みと判定される
+    dry = _upload_csv(client, cl, rows, dry_run=True)
+    assert (dry["count"], dry["skipped"], dry["dry_run"]) == (0, 2, True)
+    assert dry["skipped_samples"] == [f"{d}  50,000  振込 ヤマダ", f"{d}  3,300  コンビニ"]
+    again = _upload_csv(client, cl, rows)
+    assert (again["count"], again["skipped"]) == (0, 2)
+    assert len(_entries(client, fy)) == 2
+
+    # 次回訪問: 前回分 + 新しい行が混ざったファイル → 新しい行だけ入る
+    rows2 = rows + [_csv_row(d, "111", "400", 70000, desc="振込 サトウ")]
+    third = _upload_csv(client, cl, rows2)
+    assert (third["count"], third["skipped"]) == (1, 2)
+    assert len(_entries(client, fy)) == 3
+
+
+def test_csv_import_only_skips_exact_matches(client):
+    """日付・金額・摘要・科目・税区分・伝票メモのどれか一つでも違えば別の伝票として取り込む。"""
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+    base = _csv_row(d, "111", "400", 50000, desc="振込 ヤマダ")
+    _upload_csv(client, cl, [base])
+    variants = [
+        _csv_row(d, "111", "400", 50001, desc="振込 ヤマダ"),            # 金額
+        _csv_row(d, "111", "400", 50000, desc="振込 ヤマダ商店"),         # 摘要
+        _csv_row(d, "100", "400", 50000, desc="振込 ヤマダ"),            # 借方科目
+        _csv_row(d, "111", "400", 50000, tax="11", desc="振込 ヤマダ"),  # 税区分
+        _csv_row(d, "111", "400", 50000, desc="振込 ヤマダ", memo="要確認"),  # 伝票メモ
+    ]
+    r = _upload_csv(client, cl, variants)
+    assert (r["count"], r["skipped"]) == (5, 0)
+    # 伝票番号だけが違う / 摘要の前後に空白があるだけ → 同じ伝票として飛ばす
+    for same in (_csv_row(d, "111", "400", 50000, desc="振込 ヤマダ", vno="999"),
+                 _csv_row(d, "111", "400", 50000, desc="振込 ヤマダ ")):
+        r = _upload_csv(client, cl, [same])
+        assert (r["count"], r["skipped"]) == (0, 1), same
+    # 日付が違えば当然別物
+    d2 = (date.fromisoformat(d) + timedelta(days=1)).isoformat()
+    r = _upload_csv(client, cl, [_csv_row(d2, "111", "400", 50000, desc="振込 ヤマダ")])
+    assert (r["count"], r["skipped"]) == (1, 0)
+
+
+def test_csv_import_keeps_genuinely_repeated_transactions(client):
+    """同じ日に同じ内容の取引が本当に複数回ある場合は、その件数分だけ登録する。"""
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+    twice = [_csv_row(d, "617", "111", 10000, tax="21", desc="ATM引出")] * 2
+    r = _upload_csv(client, cl, twice)
+    assert (r["count"], r["skipped"]) == (2, 0)          # 同じファイル内の同一行は両方入る
+    r = _upload_csv(client, cl, twice)
+    assert (r["count"], r["skipped"]) == (0, 2)          # 再取込は両方飛ばす
+    r = _upload_csv(client, cl, twice * 2)
+    assert (r["count"], r["skipped"]) == (2, 2)          # 4 件のうち登録済み 2 件を超える分だけ入る
+    assert len(_entries(client, fy)) == 4
+
+
+def test_csv_import_duplicate_check_uses_computed_tax(client):
+    """消費税額を空欄で取り込んだ伝票は、次回も空欄なら (自動計算が同じなので) 登録済みと判定される。"""
+    cl, fy, acc = make_client(client, tax_method="inclusive")
+    d = fy["start_date"]
+    row = _csv_row(d, "617", "111", 11000, tax="21", desc="文具")
+    _upload_csv(client, cl, [row])
+    r = _upload_csv(client, cl, [row])
+    assert (r["count"], r["skipped"]) == (0, 1)
+    # 消費税額を明示して違う値にすれば別の伝票
+    explicit = f"{d},,617,,,,,111,,,,,11000,21,999,文具,"
+    r = _upload_csv(client, cl, [explicit])
+    assert (r["count"], r["skipped"]) == (1, 0)

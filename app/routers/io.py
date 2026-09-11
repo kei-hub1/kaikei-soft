@@ -201,15 +201,75 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
         groups[key].lines.append(line)
 
     entries = [groups[k] for k in order]
+    from .journals import _validate_entry
+    with db() as conn:
+        validated = [_validate_entry(conn, client_id, e) for e in entries]
+        existing = _existing_fingerprints(conn, client_id, [e.entry_date for e in entries])
+
+    # 既に登録済みの伝票と内容が完全に一致するものは取り込まない (二重計上の防止)。
+    # 同じ内容が既に n 件あれば n 件までを飛ばし、それを超える分は取り込む。
+    # 同じ日に同じ金額・同じ摘要の取引が本当に 2 回あることは珍しくないため。
+    fresh: list[EntryIn] = []
+    skipped: list[EntryIn] = []
+    for e, v in zip(entries, validated):
+        fp = _fingerprint(e.entry_date, e.memo, v["lines"])
+        if existing.get(fp, 0) > 0:
+            existing[fp] -= 1
+            skipped.append(e)
+        else:
+            fresh.append(e)
+
+    result = {
+        "count": len(fresh), "lines": sum(len(e.lines) for e in fresh),
+        "skipped": len(skipped), "dry_run": dry_run,
+        "skipped_samples": [_entry_label(e) for e in skipped[:20]],
+    }
     if dry_run:
-        # 検証のみ
-        from .journals import _validate_entry
-        with db() as conn:
-            for e in entries:
-                _validate_entry(conn, client_id, e)
-        return {"count": len(entries), "lines": sum(len(e.lines) for e in entries), "dry_run": True}
-    result = create_entries_bulk(client_id, entries)
-    return {"count": result["count"], "lines": sum(len(e.lines) for e in entries), "dry_run": False}
+        return result
+    created = create_entries_bulk(client_id, fresh)
+    result["count"] = created["count"]
+    return result
+
+
+def _fingerprint(entry_date: str, memo: str, lines: list[dict]) -> tuple:
+    """伝票の内容を表すキー。伝票番号以外のすべての項目で比較する。"""
+    return (entry_date, memo.strip(), tuple(
+        (l["debit_account_id"], l["debit_sub_id"], l["debit_dept_id"],
+         l["credit_account_id"], l["credit_sub_id"], l["credit_dept_id"],
+         l["amount"], l["tax_class"], l["tax_amount"], l["description"].strip())
+        for l in lines))
+
+
+def _existing_fingerprints(conn, client_id: int, dates: list[str]) -> dict[tuple, int]:
+    """取り込む日付の範囲にある既存伝票を、内容キーごとの件数にまとめる。"""
+    if not dates:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT e.id, e.entry_date, e.memo, l.debit_account_id, l.debit_sub_id, l.debit_dept_id,
+               l.credit_account_id, l.credit_sub_id, l.credit_dept_id,
+               l.amount, l.tax_class, l.tax_amount, l.description
+        FROM journal_entries e JOIN journal_lines l ON l.entry_id=e.id
+        WHERE e.client_id=? AND e.entry_date>=? AND e.entry_date<=?
+        ORDER BY e.id, l.line_no
+        """, (client_id, min(dates), max(dates))).fetchall()
+    by_entry: dict[int, tuple] = {}
+    lines_of: dict[int, list[dict]] = {}
+    for r in rows:
+        by_entry.setdefault(r["id"], (r["entry_date"], r["memo"]))
+        lines_of.setdefault(r["id"], []).append(dict(r))
+    counts: dict[tuple, int] = {}
+    for eid, (d, memo) in by_entry.items():
+        fp = _fingerprint(d, memo, lines_of[eid])
+        counts[fp] = counts.get(fp, 0) + 1
+    return counts
+
+
+def _entry_label(e: EntryIn) -> str:
+    """飛ばした伝票を画面に示すための短い表記。"""
+    amount = sum(l.amount for l in e.lines if l.debit_account_id) or sum(l.amount for l in e.lines)
+    desc = next((l.description for l in e.lines if l.description), "") or e.memo
+    return f"{e.entry_date}  {amount:,}  {desc}".rstrip()
 
 
 @router.post("/clients/{client_id}/import/accounts")

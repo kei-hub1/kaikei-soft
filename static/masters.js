@@ -895,7 +895,7 @@ routes.data = async function (main) {
       <a class="btn" href="/api/fiscal-years/${S.fy ? S.fy.id : 0}/export/journal.csv">仕訳 CSV をダウンロード</a>` : '<p class="muted">顧問先を選択してください</p>'}
     </div>
     <div class="panel"><h3 style="margin-top:0">仕訳 CSV 取込</h3>
-      ${hasClient ? `<p>本ソフトで出力した形式の CSV を取り込みます (UTF-8 / Shift_JIS)。科目はコードまたは科目名で照合します。同じ「日付+伝票番号」の行は 1 伝票にまとめます。</p>
+      ${hasClient ? `<p>本ソフトで出力した形式の CSV を取り込みます (UTF-8 / Shift_JIS)。科目はコードまたは科目名で照合します。同じ「日付+伝票番号」の行は 1 伝票にまとめます。<br><b>既に登録済みの伝票と内容が完全に一致するもの (日付・科目・金額・消費税・摘要・伝票メモがすべて同じ) は取り込みません。</b>同じ通帳履歴をもう一度取り込んでも二重計上になりません。</p>
       <div class="row"><input type="file" id="i-file" accept=".csv,text/csv"><button id="i-check">検証</button><button id="i-run" class="primary">取込</button></div>
       <div id="i-result" style="margin-top:8px"></div>
       <details style="margin-top:8px"><summary class="muted">CSV の列</summary><code style="font-size:11px">日付, 伝票番号, 借方科目コード, 借方科目名, 借方補助コード, 借方補助名, 借方部門コード, 貸方科目コード, 貸方科目名, 貸方補助コード, 貸方補助名, 貸方部門コード, 金額, 消費税区分, 消費税額, 摘要, 伝票メモ</code></details>` : '<p class="muted">顧問先を選択してください</p>'}
@@ -918,8 +918,18 @@ routes.data = async function (main) {
     res.innerHTML = '処理中...';
     try {
       const r = await api('POST', `/api/clients/${S.client.id}/import/journal?dry_run=${dry}`, fd);
-      res.innerHTML = `<span class="badge ok">${dry ? '検証OK' : '取込完了'}</span> ${r.count} 伝票 / ${r.lines} 行`;
-      if (!dry) { toast(`${r.count} 伝票を取り込みました`); await loadFiscalYears(true); }
+      let html = `<span class="badge ok">${dry ? '検証OK' : '取込完了'}</span> ${r.count} 伝票 / ${r.lines} 行`;
+      if (r.skipped) {
+        const more = r.skipped > r.skipped_samples.length ? `<li class="muted">…ほか ${r.skipped - r.skipped_samples.length} 件</li>` : '';
+        html += ` <span class="badge">${r.skipped} 伝票は登録済みのため${dry ? '取り込みません' : '飛ばしました'}</span>
+          <details style="margin-top:6px"><summary class="muted">登録済みと判定した伝票 (日付・金額・摘要)</summary>
+          <ul style="margin:4px 0 0;padding-left:20px;font-size:12px">${r.skipped_samples.map(s => `<li>${esc(s)}</li>`).join('')}${more}</ul></details>`;
+      }
+      res.innerHTML = html;
+      if (!dry) {
+        toast(r.count ? `${r.count} 伝票を取り込みました` : '取り込む伝票はありませんでした (すべて登録済み)');
+        await loadFiscalYears(true);
+      }
     } catch (e) { res.innerHTML = `<span class="badge danger">エラー</span> ${esc(e.message)}`; }
   }
   $('#i-check').onclick = () => upload(true);
