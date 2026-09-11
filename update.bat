@@ -63,11 +63,31 @@ echo     ・入力済みのデータはそのままです。
 echo     ・既にある顧問先に新しい勘定科目表を入れるには、
 echo       「勘定科目」画面の「科目表を入れ替える」を使ってください。
 echo.
-if exist "%APPDIR%\update-new.bat" echo   このファイル自体の新版を update-new.bat として保存しました。
+rem --- このファイル自体が新しくなっていないか調べる ---
+rem  update.bat is running, so it cannot overwrite itself. Receive the new one as
+rem  update-new.bat and swap it in a few seconds after this window is closed.
+set "SWAP="
+if not exist "%APPDIR%\update-new.bat" goto :report
+fc /b "%APPDIR%\update.bat" "%APPDIR%\update-new.bat" >nul 2>nul
+if errorlevel 1 goto :swap_needed
+del "%APPDIR%\update-new.bat" >nul 2>nul
+goto :report
+
+:swap_needed
+set "SWAP=1"
+echo     ・このファイル (update.bat) 自体も新しくなります。自動で入れ替えます。
+
+:report
 echo.
 echo   start.bat をダブルクリックして起動してください。
+echo   次回の更新も、この update.bat をダブルクリックするだけです。
 echo.
 pause
+
+if not defined SWAP goto :quit
+start "" /b powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 2; $d=$env:APPDIR; Copy-Item -LiteralPath (Join-Path $d 'update-new.bat') -Destination (Join-Path $d 'update.bat') -Force; Remove-Item -LiteralPath (Join-Path $d 'update-new.bat') -Force -ErrorAction SilentlyContinue"
+
+:quit
 exit /b 0
 
 :wrong_folder
