@@ -141,6 +141,9 @@ table.grid tr.group td { background: #dbeafe; font-weight: bold; }
 table.grid tr.sub td { color: #374151; font-size: 12px; }
 table.grid tr.sub td.name { padding-left: 24px; }
 table.grid tr.clickable { cursor: pointer; }
+/* 掘り下げから戻ってきたとき、元の行を一瞬光らせて見つけやすくする */
+@keyframes row-flash { from { background: #fde68a; } to { background: transparent; } }
+table.grid tr.flash > td { animation: row-flash 1.6s ease-out; }
 table.grid td.muted { color: var(--muted); }
 table.grid td.neg, .neg { color: var(--danger); }
 /* 一覧内でそのまま編集する入力欄 (勘定科目のマスタ保守など) */

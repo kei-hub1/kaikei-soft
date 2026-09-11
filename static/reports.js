@@ -63,7 +63,7 @@ routes.journal = async function (main, params) {
     <div class="field"><span>並び順</span><select id="j-sort">
       <option value="date">日付順</option><option value="description">摘要順</option></select></div>
     <button id="j-run" class="primary">表示</button>
-    ${printButton()} ${csvButton('j-csv')}
+    ${printButton()} ${csvButton('j-csv')} ${backButtonHtml()}
   </div>
   <div class="panel"><div id="j-title"></div>
   <div class="muted no-print" style="margin:2px 0 4px">行をクリックすると、その仕訳をこの画面のまま修正できます。</div>
@@ -124,6 +124,7 @@ routes.journal = async function (main, params) {
     if (tr) openEntryDialog(Number(tr.dataset.id), { onChanged: run });
   });
   await run();
+  return bindDrillBack();
 };
 
 // ---------------------------------------------------------------- 総勘定元帳
@@ -136,7 +137,7 @@ routes.ledger = async function (main, params) {
     <div class="field"><span>並び順</span><select id="l-sort">
       <option value="date">日付順</option><option value="description">摘要順</option></select></div>
     <button id="l-prev" title="前の科目">◀</button><button id="l-next" title="次の科目">▶</button>
-    ${printButton()} ${csvButton('l-csv')}
+    ${printButton()} ${csvButton('l-csv')} ${backButtonHtml()}
   </div>
   <div class="panel"><div id="l-title"></div>
   <div class="muted no-print" style="margin:2px 0 4px">行をクリックすると、その仕訳をこの画面のまま修正できます。</div>
@@ -208,6 +209,7 @@ routes.ledger = async function (main, params) {
   if (init) { acctCombo.set(init); fillSubs(); }
   if (params.sub) subSel.value = params.sub;
   await run();
+  return bindDrillBack();
 };
 
 // ---------------------------------------------------------------- 残高試算表
@@ -225,6 +227,9 @@ routes.tb = async function (main, params) {
     <th>コード</th><th>科目</th><th>繰越残高</th><th>借方</th><th>貸方</th><th>残高</th>
   </tr></thead><tbody></tbody></table></div></div>`;
   $('#t-kind').value = params.kind || localStorage.getItem('tbKind') || 'bs';
+  // 元帳から戻ってきたときに、見ていた状態をそのまま復元する
+  if (params.by_sub) $('#t-sub').checked = params.by_sub === '1';
+  if (params.zero) $('#t-zero').checked = params.zero === '1';
 
   async function run() {
     const qs = new URLSearchParams({ date_from: $('#t-from').value, date_to: $('#t-to').value, by_sub: $('#t-sub').checked });
@@ -273,9 +278,18 @@ routes.tb = async function (main, params) {
     if (!tr) return;
     const p = { account: tr.dataset.acct, from: $('#t-from').value, to: $('#t-to').value };
     if (tr.dataset.sub) p.sub = tr.dataset.sub;
-    navigate('ledger', p);
+    // 元帳から Esc で戻れるよう、いまの試算表の状態 (期間・表示・チェック) を戻り先にする
+    drillDown('ledger', p, { label: '残高試算表', rowKey: tr.dataset.acct, from: stateHash() });
   });
+  function stateHash() {
+    const qs = new URLSearchParams({
+      from: $('#t-from').value, to: $('#t-to').value, kind: $('#t-kind').value,
+      by_sub: $('#t-sub').checked ? '1' : '0', zero: $('#t-zero').checked ? '1' : '0',
+    });
+    return `#/tb?${qs}`;
+  }
   await run();
+  restoreDrillPosition('#t-table', 'data-acct');
 };
 
 // ---------------------------------------------------------------- 月次推移表
@@ -454,6 +468,10 @@ routes.descsum = async function (main, params) {
       ${fmtCell0(data.total_debit)}${fmtCell0(data.total_credit)}${fmtCell0(data.total_debit - data.total_credit)}<td></td><td></td></tr>`);
     $('#s-table tbody').innerHTML = out.join('') || '<tr><td colspan="7" class="empty">データがありません</td></tr>';
   }
+  // 仕訳帳から戻ってきたときに、見ていた状態をそのまま復元する
+  if (params.account) $('#s-acct').value = params.account;
+  if (params.q) $('#s-q').value = params.q;
+  if (params.sort) $('#s-sort').value = params.sort;
   bindMonthSelect('s', load);
   $('#s-acct').onchange = load;
   $('#s-q').oninput = () => draw();
@@ -462,7 +480,16 @@ routes.descsum = async function (main, params) {
   $('#s-table').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-desc]');
     if (!tr) return;
-    navigate('journal', { from: $('#s-from').value, to: $('#s-to').value, q: tr.dataset.desc, sort: 'description' });
+    drillDown('journal', { from: $('#s-from').value, to: $('#s-to').value, q: tr.dataset.desc, sort: 'description' },
+      { label: '摘要別集計', rowKey: tr.dataset.desc, from: stateHash() });
   });
+  function stateHash() {
+    const qs = new URLSearchParams({
+      from: $('#s-from').value, to: $('#s-to').value, account: $('#s-acct').value,
+      q: $('#s-q').value, sort: $('#s-sort').value,
+    });
+    return `#/descsum?${qs}`;
+  }
   await load();
+  restoreDrillPosition('#s-table', 'data-desc');
 };

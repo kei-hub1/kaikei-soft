@@ -336,6 +336,70 @@ function navigate(name, params) {
   if (location.hash === target) render(); else location.hash = target;
 }
 
+// ------------------------------------------------- 帳票の掘り下げと、元の画面への復帰
+// 残高試算表 → 総勘定元帳 のように帳票から帳票へ移ったとき、Esc で元の画面に戻れる
+// ようにする。戻り先は「移る直前の画面の状態」をそのまま URL にしたもの。
+let drill = null;              // { from, to, scroll, label, rowKey }
+let pendingDrillRestore = null;
+
+function drillDown(name, params, { label, rowKey, from } = {}) {
+  const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+  drill = {
+    from: from || location.hash, to: `#/${name}${qs}`,
+    scroll: window.scrollY, label: label || '前の画面', rowKey: rowKey || null,
+  };
+  navigate(name, params);
+}
+
+/** いま開いている画面に戻り先があれば返す。別の画面へ移ったら無効になる。 */
+function currentDrill() { return drill && drill.to === location.hash ? drill : null; }
+
+function drillBack() {
+  const d = currentDrill();
+  if (!d) return false;
+  drill = null;
+  pendingDrillRestore = d;
+  if (location.hash === d.from) render(); else location.hash = d.from;
+  return true;
+}
+
+/** 戻ってきた画面を描き終えたら呼ぶ。元の位置までスクロールし、元の行を光らせる。 */
+function restoreDrillPosition(tableSelector, rowAttr) {
+  const d = pendingDrillRestore;
+  pendingDrillRestore = null;
+  if (!d) return;
+  const tr = d.rowKey && tableSelector
+    ? $(`${tableSelector} tr[${rowAttr}="${CSS.escape(String(d.rowKey))}"]`) : null;
+  if (tr) {
+    tr.scrollIntoView({ block: 'center' });
+    tr.classList.add('flash');
+    setTimeout(() => tr.classList.remove('flash'), 1600);
+  } else {
+    window.scrollTo({ top: d.scroll });
+  }
+}
+
+/** 戻り先があるときだけ出す「戻る」ボタン。画面の toolbar に差し込む。 */
+function backButtonHtml() {
+  const d = currentDrill();
+  return d ? `<button id="drill-back" class="no-print" title="${esc(d.label)}へ戻ります">◀ ${esc(d.label)}へ戻る <kbd>Esc</kbd></button>` : '';
+}
+
+/** 戻るボタンと Esc キーを有効にする。戻り値を画面の後片付けに使う。 */
+function bindDrillBack() {
+  const btn = $('#drill-back');
+  if (btn) btn.onclick = () => drillBack();
+  const onKey = (e) => {
+    if (e.key !== 'Escape') return;
+    // ダイアログや科目の候補一覧が開いているときは、そちらを閉じるのが先
+    if (document.querySelector('.modal-bg')) return;
+    if (document.querySelector('.combo .dropdown.open')) return;
+    if (drillBack()) e.preventDefault();
+  };
+  document.addEventListener('keydown', onKey);
+  return () => document.removeEventListener('keydown', onKey);
+}
+
 function reportHeader(title, period) {
   const c = S.client;
   return `<div class="report-title"><div><span class="client">${esc(c.code)} ${esc(c.name)}</span>　<b>${esc(title)}</b></div>
