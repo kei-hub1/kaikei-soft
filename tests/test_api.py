@@ -867,30 +867,49 @@ def test_csv_import_skips_entries_that_already_exist(client):
     assert len(_entries(client, fy)) == 3
 
 
-def test_csv_import_only_skips_exact_matches(client):
-    """日付・金額・摘要・科目・税区分・伝票メモのどれか一つでも違えば別の伝票として取り込む。"""
+def test_csv_import_matches_on_date_amount_description_only(client):
+    """日付・金額・摘要が同じなら、科目・税区分・伝票メモ・伝票番号が違っても登録済みとみなす。"""
     cl, fy, acc = make_client(client)
     d = fy["start_date"]
-    base = _csv_row(d, "111", "400", 50000, desc="振込 ヤマダ")
-    _upload_csv(client, cl, [base])
-    variants = [
-        _csv_row(d, "111", "400", 50001, desc="振込 ヤマダ"),            # 金額
-        _csv_row(d, "111", "400", 50000, desc="振込 ヤマダ商店"),         # 摘要
-        _csv_row(d, "100", "400", 50000, desc="振込 ヤマダ"),            # 借方科目
-        _csv_row(d, "111", "400", 50000, tax="11", desc="振込 ヤマダ"),  # 税区分
+    _upload_csv(client, cl, [_csv_row(d, "111", "400", 50000, desc="振込 ヤマダ")])
+    same = [
+        _csv_row(d, "100", "400", 50000, desc="振込 ヤマダ"),                 # 借方科目を付け替えた後
+        _csv_row(d, "111", "400", 50000, tax="11", desc="振込 ヤマダ"),       # 税区分
         _csv_row(d, "111", "400", 50000, desc="振込 ヤマダ", memo="要確認"),  # 伝票メモ
+        _csv_row(d, "111", "400", 50000, desc="振込 ヤマダ", vno="999"),      # 伝票番号
+        _csv_row(d, "111", "400", 50000, desc="振込 ヤマダ "),                # 前後の空白
     ]
-    r = _upload_csv(client, cl, variants)
-    assert (r["count"], r["skipped"]) == (5, 0)
-    # 伝票番号だけが違う / 摘要の前後に空白があるだけ → 同じ伝票として飛ばす
-    for same in (_csv_row(d, "111", "400", 50000, desc="振込 ヤマダ", vno="999"),
-                 _csv_row(d, "111", "400", 50000, desc="振込 ヤマダ ")):
-        r = _upload_csv(client, cl, [same])
-        assert (r["count"], r["skipped"]) == (0, 1), same
-    # 日付が違えば当然別物
+    for row in same:
+        r = _upload_csv(client, cl, [row])
+        assert (r["count"], r["skipped"]) == (0, 1), row
+    assert len(_entries(client, fy)) == 1
+
+    # 金額・摘要・日付のどれかが違えば別の伝票
     d2 = (date.fromisoformat(d) + timedelta(days=1)).isoformat()
-    r = _upload_csv(client, cl, [_csv_row(d2, "111", "400", 50000, desc="振込 ヤマダ")])
-    assert (r["count"], r["skipped"]) == (1, 0)
+    different = [
+        _csv_row(d, "111", "400", 50001, desc="振込 ヤマダ"),
+        _csv_row(d, "111", "400", 50000, desc="振込 ヤマダ商店"),
+        _csv_row(d2, "111", "400", 50000, desc="振込 ヤマダ"),
+    ]
+    r = _upload_csv(client, cl, different)
+    assert (r["count"], r["skipped"]) == (3, 0)
+
+
+def test_csv_import_skips_after_reclassifying_the_account(client):
+    """取り込んだ仕訳の科目を画面で直した後に、同じ CSV を取り込み直しても重ならない。"""
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+    row = _csv_row(d, "111", "400", 33000, desc="コンビニ")
+    _upload_csv(client, cl, [row])
+    e = _entries(client, fy)[0]
+    # 事業主借 → 消耗品費 (課税仕入 10%) に付け替え
+    r = client.put(f"/api/entries/{e['id']}", json={"entry_date": d, "lines": [
+        {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["111"]["id"],
+         "amount": 33000, "tax_class": "21", "description": "コンビニ"}]})
+    assert r.status_code == 200, r.text
+    r = _upload_csv(client, cl, [row])
+    assert (r["count"], r["skipped"]) == (0, 1)
+    assert len(_entries(client, fy)) == 1
 
 
 def test_csv_import_keeps_genuinely_repeated_transactions(client):
@@ -905,17 +924,3 @@ def test_csv_import_keeps_genuinely_repeated_transactions(client):
     r = _upload_csv(client, cl, twice * 2)
     assert (r["count"], r["skipped"]) == (2, 2)          # 4 件のうち登録済み 2 件を超える分だけ入る
     assert len(_entries(client, fy)) == 4
-
-
-def test_csv_import_duplicate_check_uses_computed_tax(client):
-    """消費税額を空欄で取り込んだ伝票は、次回も空欄なら (自動計算が同じなので) 登録済みと判定される。"""
-    cl, fy, acc = make_client(client, tax_method="inclusive")
-    d = fy["start_date"]
-    row = _csv_row(d, "617", "111", 11000, tax="21", desc="文具")
-    _upload_csv(client, cl, [row])
-    r = _upload_csv(client, cl, [row])
-    assert (r["count"], r["skipped"]) == (0, 1)
-    # 消費税額を明示して違う値にすれば別の伝票
-    explicit = f"{d},,617,,,,,111,,,,,11000,21,999,文具,"
-    r = _upload_csv(client, cl, [explicit])
-    assert (r["count"], r["skipped"]) == (1, 0)

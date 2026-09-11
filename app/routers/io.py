@@ -206,7 +206,8 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
         validated = [_validate_entry(conn, client_id, e) for e in entries]
         existing = _existing_fingerprints(conn, client_id, [e.entry_date for e in entries])
 
-    # 既に登録済みの伝票と内容が完全に一致するものは取り込まない (二重計上の防止)。
+    # 日付・金額・摘要が一致する伝票が既にあれば取り込まない (二重計上の防止)。
+    # 科目・消費税区分は取り込んだ後で直すことがあるため、あえて比較しない。
     # 同じ内容が既に n 件あれば n 件までを飛ばし、それを超える分は取り込む。
     # 同じ日に同じ金額・同じ摘要の取引が本当に 2 回あることは珍しくないため。
     fresh: list[EntryIn] = []
@@ -232,12 +233,13 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
 
 
 def _fingerprint(entry_date: str, memo: str, lines: list[dict]) -> tuple:
-    """伝票の内容を表すキー。伝票番号以外のすべての項目で比較する。"""
-    return (entry_date, memo.strip(), tuple(
-        (l["debit_account_id"], l["debit_sub_id"], l["debit_dept_id"],
-         l["credit_account_id"], l["credit_sub_id"], l["credit_dept_id"],
-         l["amount"], l["tax_class"], l["tax_amount"], l["description"].strip())
-        for l in lines))
+    """重複判定に使うキー: 日付と、各行の金額・摘要。
+
+    科目・補助科目・部門・消費税区分・税額・伝票メモ・伝票番号は比較しない。
+    通帳から取り込んだ仕訳は後で科目を付け替えるのが前提で、付け替えた後に
+    同じ期間を取り込み直しても重ならないようにするため。
+    """
+    return (entry_date, tuple((l["amount"], l["description"].strip()) for l in lines))
 
 
 def _existing_fingerprints(conn, client_id: int, dates: list[str]) -> dict[tuple, int]:
@@ -246,9 +248,7 @@ def _existing_fingerprints(conn, client_id: int, dates: list[str]) -> dict[tuple
         return {}
     rows = conn.execute(
         """
-        SELECT e.id, e.entry_date, e.memo, l.debit_account_id, l.debit_sub_id, l.debit_dept_id,
-               l.credit_account_id, l.credit_sub_id, l.credit_dept_id,
-               l.amount, l.tax_class, l.tax_amount, l.description
+        SELECT e.id, e.entry_date, e.memo, l.amount, l.description
         FROM journal_entries e JOIN journal_lines l ON l.entry_id=e.id
         WHERE e.client_id=? AND e.entry_date>=? AND e.entry_date<=?
         ORDER BY e.id, l.line_no
