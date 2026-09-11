@@ -58,7 +58,7 @@ routes.journal = async function (main, params) {
   main.innerHTML = `<h2>仕訳帳</h2>
   <div class="toolbar no-print">
     ${periodToolbar('j', { from: params.from, to: params.to })}
-    <div class="field"><span>科目</span>${accountSelectHtml('j-acct')}</div>
+    <div class="field"><span>科目</span><input id="j-acct" style="width:200px" placeholder="コード・かな・名称 (空欄で全科目)"></div>
     <div class="field"><span>摘要検索</span><input id="j-q" style="width:160px"></div>
     <div class="field"><span>並び順</span><select id="j-sort">
       <option value="date">日付順</option><option value="description">摘要順</option></select></div>
@@ -70,14 +70,19 @@ routes.journal = async function (main, params) {
   <div class="scroll-x"><table class="grid compact sticky-head" id="j-table"><thead><tr>
     <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th>${exempt ? '' : '<th>税区分</th><th>内消費税</th>'}<th>摘要</th>
   </tr></thead><tbody></tbody></table></div></div>`;
-  if (params.account) $('#j-acct').value = params.account;
+  // 開いた直後からコードを打てるよう、科目欄は入力欄 (コード・かな・名称で検索)
+  const acctCombo = makeCombo($('#j-acct'), {
+    items: () => S.accounts,
+    onCommit: () => { run(); $('#j-acct').select(); },
+  });
+  if (params.account) acctCombo.set(Number(params.account));
   if (params.q) $('#j-q').value = params.q;
   if (params.sort) $('#j-sort').value = params.sort;
 
   async function run() {
     const sort = $('#j-sort').value;
     const qs = new URLSearchParams({ fiscal_year_id: S.fy.id, date_from: $('#j-from').value, date_to: $('#j-to').value, limit: 5000, sort });
-    if ($('#j-acct').value) qs.set('account_id', $('#j-acct').value);
+    if (acctCombo.id) qs.set('account_id', acctCombo.id);
     if ($('#j-q').value.trim()) qs.set('q', $('#j-q').value.trim());
     const r = await GET(`/api/clients/${S.client.id}/entries?${qs}`);
     $('#j-title').innerHTML = reportHeader('仕訳帳', `${fmtDate($('#j-from').value)} 〜 ${fmtDate($('#j-to').value)}　${r.total} 伝票${sort === 'description' ? '　摘要順' : ''}`);
@@ -115,7 +120,6 @@ routes.journal = async function (main, params) {
   $('#j-run').onclick = run;
   $('#j-sort').onchange = run;
   $('#j-q').onkeydown = (e) => { if (e.key === 'Enter') run(); };
-  $('#j-acct').onchange = run;
   bindMonthSelect('j', run);
   $('#j-csv').onclick = () => tableToCsv($('#j-table'), `仕訳帳_${S.client.code}.csv`);
   // 行をクリックしたら、その場で修正できるダイアログを開く
@@ -124,6 +128,7 @@ routes.journal = async function (main, params) {
     if (tr) openEntryDialog(Number(tr.dataset.id), { onChanged: run });
   });
   await run();
+  $('#j-acct').focus({ preventScroll: true });
   return bindDrillBack();
 };
 
@@ -144,7 +149,12 @@ routes.ledger = async function (main, params) {
   <div class="scroll-x"><table class="grid compact sticky-head" id="l-table"><thead><tr>
     <th>日付</th><th>No</th><th>相手科目</th><th>相手補助</th><th>摘要</th><th>借方</th><th>貸方</th><th>残高</th>
   </tr></thead><tbody></tbody></table></div></div>`;
-  const acctCombo = makeCombo($('#l-acct'), { items: () => S.accounts, onChange: () => { fillSubs(); run(); }, onCommit: () => run() });
+  // 確定後は入力欄の文字を選択状態にしておく。続けて次のコードを打つだけで切り替わる。
+  const acctCombo = makeCombo($('#l-acct'), {
+    items: () => S.accounts,
+    onChange: () => { fillSubs(); run(); },
+    onCommit: () => { run(); $('#l-acct').select(); },
+  });
   const subSel = $('#l-sub');
   function fillSubs() {
     const subs = acctCombo.id ? (S.subsByAccount[acctCombo.id] || []) : [];
@@ -209,6 +219,7 @@ routes.ledger = async function (main, params) {
   if (init) { acctCombo.set(init); fillSubs(); }
   if (params.sub) subSel.value = params.sub;
   await run();
+  $('#l-acct').focus({ preventScroll: true });
   return bindDrillBack();
 };
 
@@ -216,6 +227,7 @@ routes.ledger = async function (main, params) {
 routes.tb = async function (main, params) {
   main.innerHTML = `<h2>残高試算表</h2>
   <div class="toolbar no-print">
+    <div class="field"><span>科目を開く</span><input id="t-find" style="width:200px" placeholder="コード・かな・名称"></div>
     ${periodToolbar('t', { from: params.from, to: params.to })}
     <div class="field"><span>表示</span><select id="t-kind"><option value="bs">貸借対照表科目</option><option value="pl">損益計算書科目</option><option value="all">すべて</option></select></div>
     <label><input type="checkbox" id="t-sub"> 補助科目を表示</label>
@@ -288,7 +300,17 @@ routes.tb = async function (main, params) {
     });
     return `#/tb?${qs}`;
   }
+  // コードを打って Enter を押すと、その科目の総勘定元帳を開く (行のクリックと同じ)
+  makeCombo($('#t-find'), {
+    items: () => S.accounts,
+    onCommit: (it) => {
+      if (!it) return;
+      drillDown('ledger', { account: it.id, from: $('#t-from').value, to: $('#t-to').value },
+        { label: '残高試算表', rowKey: it.id, from: stateHash() });
+    },
+  });
   await run();
+  $('#t-find').focus({ preventScroll: true });
   restoreDrillPosition('#t-table', 'data-acct');
 };
 
