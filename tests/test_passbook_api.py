@@ -160,21 +160,21 @@ def test_ocr_engines_endpoint(client):
     assert body["default"] is None or isinstance(body["default"], str)
 
 
-def test_analyze_image_rejects_non_image(client, sole):
+def test_analyze_file_rejects_unsupported_format(client, sole):
     cl, fy, acc = sole
     files = {"file": ("passbook.txt", io.BytesIO(b"abc"), "text/plain")}
-    r = client.post(f"/api/clients/{cl['id']}/passbook/analyze-image", files=files)
-    assert r.status_code == 400 and "画像" in r.json()["detail"]
+    r = client.post(f"/api/clients/{cl['id']}/passbook/analyze-file", files=files)
+    assert r.status_code == 400 and "対応していない形式" in r.json()["detail"]
 
 
-def test_analyze_image_without_ocr_engine_reports_clearly(client, sole, monkeypatch):
-    """OCR が使えない環境では、貼り付け取込を案内するメッセージを返す。"""
+def test_analyze_file_without_ocr_engine_reports_clearly(client, sole, monkeypatch):
+    """OCR が使えない環境では、別の取り込み方を案内するメッセージを返す。"""
     from app import ocr as ocrmod
     monkeypatch.setattr(ocrmod, "available_engines", lambda: [])
     monkeypatch.setattr(ocrmod, "default_engine", lambda: None)
     cl, fy, acc = sole
     files = {"file": ("p.png", io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"0" * 50), "image/png")}
-    r = client.post(f"/api/clients/{cl['id']}/passbook/analyze-image", files=files)
+    r = client.post(f"/api/clients/{cl['id']}/passbook/analyze-file", files=files)
     assert r.status_code == 400
     assert "貼り付け" in r.json()["detail"]
 
@@ -340,3 +340,100 @@ def test_trial_balance_reflects_passbook_entries(client, sole):
     owner = acc_by_id(acc, pb["counter_account_id"])["code"]
     assert rows[owner]["closing_n"] == 280000             # 事業主借 (貸方残)
     assert sum(r["debit"] for r in tb["rows"]) == sum(r["credit"] for r in tb["rows"])
+
+
+# ---------------------------------------------------------------------------
+# PDF / DocuWorks の取り込み
+# ---------------------------------------------------------------------------
+
+def test_formats_endpoint(client):
+    r = client.get("/api/passbook/formats")
+    assert r.status_code == 200
+    b = r.json()
+    assert ".jpg" in b["accept"] and ".pdf" in b["accept"] and ".xdw" in b["accept"]
+    assert isinstance(b["pdf"], bool) and isinstance(b["ocr"], list)
+    assert b["xdw_command"] == ""
+
+
+def test_settings_roundtrip(client):
+    assert client.get("/api/settings").json() == {"xdw_converter": ""}
+    r = client.put("/api/settings", json={"xdw_converter": 'conv.exe "{input}" "{output}"'})
+    assert r.status_code == 200
+    assert client.get("/api/settings").json()["xdw_converter"] == 'conv.exe "{input}" "{output}"'
+    # {input} が無いコマンドは受け付けない
+    bad = client.put("/api/settings", json={"xdw_converter": "conv.exe"})
+    assert bad.status_code == 400 and "{input}" in bad.json()["detail"]
+    # 空にすれば解除できる
+    assert client.put("/api/settings", json={"xdw_converter": ""}).json()["xdw_converter"] == ""
+
+
+def test_analyze_searchable_pdf_without_ocr(client, sole, tmp_path, monkeypatch):
+    """文字情報つき PDF は OCR が無い環境でも取り込める。"""
+    pytest.importorskip("pypdfium2")
+    from app import ocr as ocrmod
+    monkeypatch.setattr(ocrmod, "available_engines", lambda: [])
+    monkeypatch.setattr(ocrmod, "default_engine", lambda: None)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_docfiles import make_text_pdf
+
+    cl, fy, acc = sole
+    cid = cl["id"]
+    pb = make_passbook(client, cid, acc)
+    y = fy["start_date"][:4]
+    pdf = make_text_pdf(tmp_path / "p.pdf", [
+        f"{y}-01-01 KA)YAMADA SHOUTEN 330,000 1,530,000",
+        f"{y}-01-05 ATM 50,000 1,480,000",
+    ])
+    files = {"file": ("passbook.pdf", io.BytesIO(pdf.read_bytes()), "application/pdf")}
+    r = client.post(f"/api/clients/{cid}/passbook/analyze-file",
+                    params={"fiscal_year_id": fy["id"], "opening_balance": 1200000}, files=files)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["method"] == "PDF の文字情報"
+    assert data["ocr_engine"] == ""
+    assert [x["direction"] for x in data["rows"]] == ["in", "out"]
+    assert [x["amount"] for x in data["rows"]] == [330000, 50000]
+    assert "YAMADA" in data["rows"][0]["description"]
+
+    # そのまま仕訳にできる
+    reg = client.post(f"/api/clients/{cid}/passbook/register", json={
+        "passbook_id": pb["id"],
+        "rows": [{"entry_date": x["date"], "description": x["description"],
+                  "amount": x["amount"], "direction": x["direction"]} for x in data["rows"]],
+        "source": "pdf"})
+    assert reg.json()["created"] == 2
+
+
+def test_analyze_xdw_with_embedded_images_needs_ocr(client, sole, monkeypatch):
+    """.xdw から画像は取り出せるが、OCR が無ければその旨を返す。"""
+    pytest.importorskip("PIL")
+    from PIL import Image
+    from app import ocr as ocrmod
+    monkeypatch.setattr(ocrmod, "available_engines", lambda: [])
+    monkeypatch.setattr(ocrmod, "default_engine", lambda: None)
+    buf = io.BytesIO()
+    Image.new("RGB", (800, 600), "white").save(buf, "JPEG", quality=80)
+    blob = b"XDW header" + b"\x00" * 200 + buf.getvalue()
+
+    cl, fy, acc = sole
+    files = {"file": ("scan.xdw", io.BytesIO(blob), "application/octet-stream")}
+    r = client.post(f"/api/clients/{cl['id']}/passbook/analyze-file", files=files)
+    assert r.status_code == 400
+    assert "貼り付け" in r.json()["detail"]
+
+
+def test_analyze_xdw_that_cannot_be_read_gives_guidance(client, sole):
+    cl, fy, acc = sole
+    files = {"file": ("x.xdw", io.BytesIO(b"XDW" + b"\x01\x02" * 5000), "application/octet-stream")}
+    r = client.post(f"/api/clients/{cl['id']}/passbook/analyze-file", files=files)
+    assert r.status_code == 400
+    msg = r.json()["detail"]
+    assert "DocuWorks" in msg and "PDF" in msg
+
+
+def test_upload_size_limit(client, sole):
+    cl, fy, acc = sole
+    big = io.BytesIO(b"\x00" * (61 * 1024 * 1024))
+    files = {"file": ("big.jpg", big, "image/jpeg")}
+    r = client.post(f"/api/clients/{cl['id']}/passbook/analyze-file", files=files)
+    assert r.status_code == 400 and "大きすぎます" in r.json()["detail"]

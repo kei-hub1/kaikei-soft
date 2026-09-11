@@ -139,6 +139,11 @@ CREATE TABLE IF NOT EXISTS descriptions (
 );
 CREATE INDEX IF NOT EXISTS idx_descriptions_client ON descriptions(client_id, sort_order);
 
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS passbooks (
   id INTEGER PRIMARY KEY,
   client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,

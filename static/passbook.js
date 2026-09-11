@@ -110,6 +110,7 @@ routes.passbooks = async function (main) {
 routes.passbook = async function (main) {
   let passbooks = [];
   let engines = { engines: [], default: null };
+  let formats = { accept: ['.jpg', '.png'], pdf: false, ocr: [], docuworks_installed: false, xdw_command: '' };
   let parsed = null;      // 解析結果
   let rows = [];          // 確認・修正中の行
 
@@ -120,8 +121,8 @@ routes.passbook = async function (main) {
       <div class="field"><span>通帳</span><select id="pk-book" style="min-width:220px"></select></div>
       <div class="field"><span>前回の最終残高 (1 行目の判定に使う)</span><input id="pk-open" class="num" style="width:130px"></div>
       <div class="field"><span>読み取り方法</span><select id="pk-engine"></select></div>
-      <div class="field"><span>写真</span><input type="file" id="pk-file" accept="image/*" multiple></div>
-      <button id="pk-run" class="primary">写真から読み取る</button>
+      <div class="field"><span>ファイル (写真 / PDF / DocuWorks)</span><input type="file" id="pk-file" multiple></div>
+      <button id="pk-run" class="primary">ファイルから読み取る</button>
       <button id="pk-paste">文字を貼り付けて取込</button>
     </div>
     <div id="pk-note" class="help"></div>
@@ -130,10 +131,12 @@ routes.passbook = async function (main) {
 
   // ---- 起動時の読み込み
   try {
-    [passbooks, engines] = await Promise.all([
+    [passbooks, engines, formats] = await Promise.all([
       GET(`/api/clients/${S.client.id}/passbooks`),
       GET('/api/ocr/engines'),
+      GET('/api/passbook/formats'),
     ]);
+    $('#pk-file').accept = formats.accept.join(',');
   } catch (e) { showError(e); }
 
   const bookSel = $('#pk-book');
@@ -147,26 +150,35 @@ routes.passbook = async function (main) {
   const engSel = $('#pk-engine');
   engSel.innerHTML = engines.engines.map(e => `<option value="${e.code}">${esc(e.name)}</option>`).join('')
     || '<option value="">(使える読み取り機能がありません)</option>';
-  $('#pk-run').disabled = !engines.engines.length;
-  $('#pk-file').disabled = !engines.engines.length;
+  // 文字情報つき PDF は OCR 無しでも読めるので、常に使えるようにしておく
 
   const notes = [];
   if (!passbooks.length) {
     notes.push('<span class="badge danger">通帳が未登録です</span> 先に「通帳」画面で通帳を登録してください。');
   }
+  notes.push(`取り込めるファイル: 写真 (${formats.accept.filter(x => x !== '.pdf' && x !== '.xdw' && x !== '.xbd').join(' ')})`
+    + (formats.pdf ? '、PDF' : '') + '、DocuWorks (.xdw)');
+  if (formats.pdf) {
+    notes.push('<b>文字情報つきの PDF (検索可能 PDF) が最も正確です。</b> 複合機のスキャンで「検索可能PDF」を選べる場合は、それで取り込んでください。OCR を通さずそのまま読み取ります。');
+  } else {
+    notes.push('<span class="badge warn">PDF が読み込めません</span> start.bat を実行し直すと必要な部品が入ります。');
+  }
+  notes.push('<b>DocuWorks (.xdw)</b> は公開仕様が無いため、埋め込まれた画像の取り出しを試みます。'
+    + '読み取れない場合は、DocuWorks で <b>PDF に書き出してから</b>取り込んでください'
+    + (formats.xdw_command ? '（変換コマンドが設定されています）' : '（「データ管理」画面で変換コマンドを設定することもできます）') + '。');
   if (!engines.engines.length) {
     notes.push('<span class="badge warn">写真の読み取りが使えません</span> この環境には OCR がありません。'
-      + '「文字を貼り付けて取込」なら使えます。Windows の場合は「設定 → 時刻と言語 → 言語と地域」で日本語の言語機能を追加すると写真からも読めるようになります。');
+      + '文字情報つき PDF か「文字を貼り付けて取込」なら使えます。Windows の場合は「設定 → 時刻と言語 → 言語と地域」で日本語の言語機能を追加すると写真からも読めるようになります。');
   } else {
     notes.push((engines.engines.find(e => e.code === engSel.value) || engines.engines[0]).note || '');
   }
-  notes.push('読み取りは必ず間違いが混じります。<b>登録する前に必ず内容を確認してください。</b> 入金・出金は残高の増減から判定し、金額と合わない行には印を付けます。');
+  notes.push('読み取りは間違いが混じることがあります。<b>登録する前に必ず内容を確認してください。</b> 入金・出金は残高の増減から判定し、金額と合わない行には印を付けます。');
   $('#pk-note').innerHTML = notes.filter(Boolean).map(n => `<div>${n}</div>`).join('');
 
   // ---- 解析
-  async function analyzeImages() {
+  async function analyzeFiles() {
     const files = Array.from($('#pk-file').files || []);
-    if (!files.length) { toast('通帳の写真を選んでください', true); return; }
+    if (!files.length) { toast('通帳のファイルを選んでください', true); return; }
     const all = [];
     let first = null;
     $('#pk-result').innerHTML = '<div class="panel">読み取っています... しばらくお待ちください</div>';
@@ -181,7 +193,7 @@ routes.passbook = async function (main) {
       const carry = all.length ? lastBalanceOf(all) : (open ? parseAmount(open) : null);
       if (carry != null) qs.set('opening_balance', carry);
       try {
-        const r = await api('POST', `/api/clients/${S.client.id}/passbook/analyze-image?${qs}`, fd);
+        const r = await api('POST', `/api/clients/${S.client.id}/passbook/analyze-file?${qs}`, fd);
         if (!first) first = r;
         all.push(r);
       } catch (e) {
@@ -257,7 +269,8 @@ routes.passbook = async function (main) {
     $('#pk-result').innerHTML = `
     <div class="panel">
       <div class="row between" style="margin-bottom:6px">
-        <div>読み取った通帳: ${matched}${infoText ? `　<span class="muted">写真の記載: ${esc(infoText)}</span>` : ''}</div>
+        <div>読み取った通帳: ${matched}${infoText ? `　<span class="muted">記載: ${esc(infoText)}</span>` : ''}
+          ${parsed.method ? `　<span class="badge">${esc(parsed.method)}</span>` : ''}</div>
         <div id="pk-summary" class="muted"></div>
       </div>
       <div class="toolbar" style="margin-bottom:4px">
@@ -273,6 +286,7 @@ routes.passbook = async function (main) {
         <th style="width:90px">入出金</th><th style="width:110px">金額</th><th style="width:110px">残高</th>
         <th>摘要</th><th style="width:260px">確認事項</th>
       </tr></thead><tbody></tbody></table></div>
+      ${parsed.method_note ? `<div class="help">${esc(parsed.method_note)}</div>` : ''}
       ${parsed.skipped && parsed.skipped.length ? `<details style="margin-top:8px"><summary class="muted">読み飛ばした行 (${parsed.skipped.length})</summary>
         <div class="mono" style="font-size:11px;white-space:pre-wrap">${esc(parsed.skipped.join('\n'))}</div></details>` : ''}
     </div>`;
@@ -397,7 +411,7 @@ routes.passbook = async function (main) {
     };
   }
 
-  $('#pk-run').onclick = analyzeImages;
+  $('#pk-run').onclick = analyzeFiles;
   $('#pk-paste').onclick = openPasteDialog;
   engSel.onchange = () => {
     const e = engines.engines.find(x => x.code === engSel.value);

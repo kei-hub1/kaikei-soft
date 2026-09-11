@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-import shutil
+import tempfile
 import uuid
 from datetime import date
 from pathlib import Path
@@ -15,14 +15,19 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from .. import ocr
+from .. import docfiles, ocr
 from ..db import db, get_db_path, now_iso, rows_to_dicts
 from ..passbook import extract_account_info, parse_passbook_text
 
 router = APIRouter(prefix="/api", tags=["passbooks"])
 
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
-MAX_IMAGE_BYTES = 25 * 1024 * 1024
+MAX_UPLOAD_BYTES = 60 * 1024 * 1024
+XDW_COMMAND_KEY = "xdw_converter"
+
+
+def get_setting(conn, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
 
 
 def images_dir() -> Path:
@@ -236,34 +241,101 @@ def analyze_text(client_id: int, body: AnalyzeTextIn):
                         body.passbook_id, body.opening_balance)
 
 
-@router.post("/clients/{client_id}/passbook/analyze-image")
-async def analyze_image(client_id: int, file: UploadFile, engine: str | None = None,
-                        fiscal_year_id: int | None = None, passbook_id: int | None = None,
-                        opening_balance: int | None = None):
-    """通帳の写真を OCR して解析する (登録はしない)。画像は data 内に保存する。"""
+class SettingsIn(BaseModel):
+    xdw_converter: str = ""
+
+
+@router.get("/settings")
+def read_settings():
+    with db() as conn:
+        return {"xdw_converter": get_setting(conn, XDW_COMMAND_KEY)}
+
+
+@router.put("/settings")
+def write_settings(body: SettingsIn):
+    """DocuWorks の変換コマンドなど、パソコンごとの設定。"""
+    cmd = body.xdw_converter.strip()
+    if cmd and "{input}" not in cmd:
+        raise HTTPException(400, "変換コマンドには、取り込むファイルの場所を表す {input} を入れてください")
+    with db() as conn:
+        conn.execute("INSERT INTO settings(key,value) VALUES(?,?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (XDW_COMMAND_KEY, cmd))
+        return {"xdw_converter": cmd}
+
+
+@router.get("/passbook/formats")
+def passbook_formats():
+    """取り込めるファイル形式と、この環境で使える読み取り方法。"""
+    info = docfiles.supported_note()
+    with db() as conn:
+        info["xdw_command"] = get_setting(conn, XDW_COMMAND_KEY)
+    info["ocr"] = ocr.available_engines()
+    info["accept"] = sorted(docfiles.SUPPORTED_SUFFIXES)
+    return info
+
+
+@router.post("/clients/{client_id}/passbook/analyze-file")
+async def analyze_file(client_id: int, file: UploadFile, engine: str | None = None,
+                       fiscal_year_id: int | None = None, passbook_id: int | None = None,
+                       opening_balance: int | None = None):
+    """通帳のファイル (画像 / PDF / DocuWorks) から仕訳の下書きを作る (登録はしない)。
+
+    PDF に文字情報があればそれを使う (OCR より正確)。無ければページを画像にして
+    OCR にかける。DocuWorks は変換コマンドか埋め込み画像の取り出しを試す。
+    """
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in IMAGE_SUFFIXES:
-        raise HTTPException(400, f"画像ファイルを選んでください (対応: {', '.join(sorted(IMAGE_SUFFIXES))})")
+    if suffix not in docfiles.SUPPORTED_SUFFIXES:
+        raise HTTPException(400, f"対応していない形式です ({suffix or '拡張子なし'})。"
+                                 f"対応: {', '.join(sorted(docfiles.SUPPORTED_SUFFIXES))}")
     data = await file.read()
     if not data:
         raise HTTPException(400, "ファイルが空です")
-    if len(data) > MAX_IMAGE_BYTES:
-        raise HTTPException(400, f"画像が大きすぎます ({len(data) // 1024 // 1024} MB)。25 MB 以下にしてください")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, f"ファイルが大きすぎます ({len(data) // 1024 // 1024} MB)。"
+                                 f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB 以下にしてください")
 
     saved = images_dir() / f"{date.today():%Y%m%d}_{uuid.uuid4().hex[:12]}{suffix}"
     saved.write_bytes(data)
-    try:
-        text = ocr.run_ocr(saved, engine)
-    except ocr.OcrError as e:
-        saved.unlink(missing_ok=True)
-        raise HTTPException(400, str(e))
 
     with db() as conn:
         if not conn.execute("SELECT 1 FROM clients WHERE id=?", (client_id,)).fetchone():
+            saved.unlink(missing_ok=True)
             raise HTTPException(404, "顧問先が見つかりません")
+        xdw_cmd = get_setting(conn, XDW_COMMAND_KEY)
+
+    used_engine = ""
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            doc = docfiles.load(saved, Path(tmp), xdw_cmd)
+        except docfiles.DocumentError as e:
+            saved.unlink(missing_ok=True)
+            raise HTTPException(400, str(e))
+
+        if doc.text is not None:
+            text = doc.text
+        else:
+            if not ocr.available_engines():
+                saved.unlink(missing_ok=True)
+                raise HTTPException(400,
+                    "この環境では画像から文字を読み取れません。"
+                    "文字情報付きの PDF を取り込むか、通帳のテキストを貼り付けて取り込んでください。")
+            parts = []
+            for img in doc.images:
+                try:
+                    parts.append(ocr.run_ocr(img, engine))
+                except ocr.OcrError as e:
+                    saved.unlink(missing_ok=True)
+                    raise HTTPException(400, str(e))
+            text = "\n".join(parts)
+            used_engine = engine or ocr.default_engine() or ""
+
+    with db() as conn:
         result = _analyze(conn, client_id, text, fiscal_year_id, passbook_id, opening_balance)
     result["image_path"] = saved.name
-    result["ocr_engine"] = engine or ocr.default_engine() or ""
+    result["ocr_engine"] = used_engine
+    result["method"] = doc.method
+    result["method_note"] = doc.note
+    result["pages"] = len(doc.images) or 1
     return result
 
 
