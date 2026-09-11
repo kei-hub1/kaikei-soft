@@ -36,6 +36,10 @@ echo   最新版をダウンロードしています...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $tmp=Join-Path $env:TEMP ('kaikei_up_' + [Guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force -Path $tmp | Out-Null; $zip=Join-Path $tmp 'src.zip'; Invoke-WebRequest -Uri $env:ZIPURL -OutFile $zip -UseBasicParsing; Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force; $src=Get-ChildItem -LiteralPath $tmp -Directory | Select-Object -First 1; if (-not $src) { throw 'extracted folder not found' }; foreach ($i in Get-ChildItem -LiteralPath $src.FullName) { if ($i.Name -eq 'data') { continue }; $dest=Join-Path $env:APPDIR $i.Name; if ($i.Name -eq 'update.bat') { $dest=Join-Path $env:APPDIR 'update-new.bat' }; if ($i.PSIsContainer) { if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }; Copy-Item -LiteralPath $i.FullName -Destination $dest -Recurse -Force } else { Copy-Item -LiteralPath $i.FullName -Destination $dest -Force } }; Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue; exit 0 } catch { Write-Output $_.Exception.Message; exit 1 }"
 if errorlevel 1 goto :download_failed
 
+rem --- 不要になったファイルの削除 ---
+rem  Files removed upstream are not overwritten by the copy above, so delete them here.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$o=@('app\passbook.py','app\ocr.py','app\docfiles.py','app\routers\passbooks.py','static\passbook.js','scripts','app\__pycache__','app\routers\__pycache__'); foreach ($r in $o) { $t=Join-Path $env:APPDIR $r; if (Test-Path -LiteralPath $t) { Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue } }"
+
 rem --- 追加ライブラリの取り込み ---
 echo.
 echo   必要なライブラリを確認しています...

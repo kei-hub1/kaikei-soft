@@ -802,7 +802,7 @@ def test_description_sort_uses_kana_when_registered(client):
 
 def test_pages_are_not_cached_by_the_browser(client):
     """更新後に古い画面が表示されないよう、毎回サーバーに確認させる。"""
-    for url in ("/", "/static/index.html", "/static/app.js", "/static/passbook.js", "/static/style.css"):
+    for url in ("/", "/static/index.html", "/static/app.js", "/static/style.css"):
         r = client.get(url)
         assert r.status_code == 200, url
         assert "no-cache" in r.headers.get("cache-control", ""), url
@@ -814,11 +814,9 @@ def test_pages_are_not_cached_by_the_browser(client):
 
 
 def test_new_screens_are_in_the_menu(client):
-    """通帳取込などの画面がメニューに並んでいること。"""
+    """後から足した画面がメニューに並んでいること。"""
     html = client.get("/").text
-    for route, label in [("passbook", "通帳取込"), ("passbooks", "通帳"),
-                         ("descriptions", "摘要"), ("descsum", "摘要別集計")]:
+    for route, label in [("descriptions", "摘要"), ("descsum", "摘要別集計"),
+                         ("templates", "定型仕訳")]:
         assert f'data-route="{route}"' in html, route
         assert label in html, label
-    scripts = client.get("/static/index.html").text
-    assert "/static/passbook.js" in scripts

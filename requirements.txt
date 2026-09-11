@@ -4,6 +4,3 @@
 fastapi>=0.110
 uvicorn>=0.29
 python-multipart>=0.0.9
-# PDF と DocuWorks (.xdw) の取り込みに使う。入っていなくても画像の取り込みは動く。
-pypdfium2>=4
-pillow>=10

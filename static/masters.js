@@ -904,30 +904,11 @@ routes.data = async function (main) {
       ${hasClient && S.fy ? `<p>「${esc(S.fy.label)}」の期末残高を翌期の期首残高へ転記します。翌期が無い場合は自動作成します。当期純利益は ${S.client.entity_type === 'sole' ? '元入金' : '繰越利益剰余金'} へ加算されます。<br>翌期の期首残高は上書きされます。決算確定後に実行してください (何度でも再実行できます)。</p>
       <button id="cf-run" class="primary">繰越処理を実行</button>` : '<p class="muted">顧問先を選択してください</p>'}
     </div>
-    <div class="panel"><h3 style="margin-top:0">DocuWorks (.xdw) の変換</h3>
-      <p>通帳取込で DocuWorks のファイルを読み取れない場合、変換コマンドを設定すると
-      そのコマンドで PDF に変換してから取り込みます。空欄のままでも、埋め込まれた画像の取り出しは試みます。</p>
-      <div class="row"><input type="text" id="xdw-cmd" style="flex:1;min-width:280px"
-        placeholder='例: "C:\\Program Files\\DocuWorks\\変換ツール.exe" "{input}" "{output}"'>
-        <button id="xdw-save" class="primary">保存</button></div>
-      <p class="help"><code>{input}</code> が取り込むファイル、<code>{output}</code> が変換後の PDF の場所に置き換わります。
-      設定しない場合は、DocuWorks Desk で PDF に書き出してから取り込んでください。</p>
-    </div>
     <div class="panel"><h3 style="margin-top:0">バックアップ</h3>
       <p>全データ (SQLite ファイル) をダウンロードします。復元するときは、サーバー停止後に <code>data/kaikei.db</code> をこのファイルで置き換えてください。</p>
       <a class="btn" href="/api/backup">バックアップをダウンロード</a>
     </div>
   </div>`;
-  try {
-    $('#xdw-cmd').value = (await GET('/api/settings')).xdw_converter || '';
-  } catch (e) { /* 設定が読めなくても他の機能は使える */ }
-  $('#xdw-save').onclick = async () => {
-    try {
-      const r = await PUT('/api/settings', { xdw_converter: $('#xdw-cmd').value });
-      toast(r.xdw_converter ? '変換コマンドを保存しました' : '変換コマンドを解除しました');
-    } catch (e) { showError(e); }
-  };
-
   if (!hasClient) return;
   async function upload(dry) {
     const f = $('#i-file').files[0];

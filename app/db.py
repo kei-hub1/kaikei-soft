@@ -139,44 +139,6 @@ CREATE TABLE IF NOT EXISTS descriptions (
 );
 CREATE INDEX IF NOT EXISTS idx_descriptions_client ON descriptions(client_id, sort_order);
 
-CREATE TABLE IF NOT EXISTS settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS passbooks (
-  id INTEGER PRIMARY KEY,
-  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-  code TEXT NOT NULL DEFAULT '',
-  name TEXT NOT NULL,
-  bank_name TEXT NOT NULL DEFAULT '',
-  branch_name TEXT NOT NULL DEFAULT '',
-  account_type TEXT NOT NULL DEFAULT '普通',
-  account_number TEXT NOT NULL DEFAULT '',
-  account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,      -- 普通預金の科目
-  sub_account_id INTEGER REFERENCES sub_accounts(id) ON DELETE SET NULL,
-  counter_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,  -- 相手科目 (事業主借など)
-  last_balance INTEGER,          -- 前回取り込んだ最終残高 (次回の判定に使う)
-  last_date TEXT,
-  sort_order INTEGER NOT NULL DEFAULT 0,
-  active INTEGER NOT NULL DEFAULT 1,
-  UNIQUE(client_id, name)
-);
-CREATE INDEX IF NOT EXISTS idx_passbooks_client ON passbooks(client_id, sort_order);
-
-CREATE TABLE IF NOT EXISTS passbook_imports (
-  id INTEGER PRIMARY KEY,
-  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-  passbook_id INTEGER REFERENCES passbooks(id) ON DELETE SET NULL,
-  source TEXT NOT NULL DEFAULT 'image',   -- image / text
-  image_path TEXT NOT NULL DEFAULT '',
-  ocr_engine TEXT NOT NULL DEFAULT '',
-  raw_text TEXT NOT NULL DEFAULT '',
-  entry_count INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_passbook_imports_client ON passbook_imports(client_id, created_at);
-
 CREATE TABLE IF NOT EXISTS entry_templates (
   id INTEGER PRIMARY KEY,
   client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
@@ -211,10 +173,12 @@ def connect() -> sqlite3.Connection:
 # 既存の DB に後から追加した列。(テーブル名, 列名, 定義) を並べておけば起動時に補う。
 # 新しいテーブルは SCHEMA の CREATE TABLE IF NOT EXISTS で自動的に作られる。
 ADDED_COLUMNS: list[tuple[str, str, str]] = [
-    # 通帳取込で作った仕訳を、どの通帳から起こしたか分かるようにする
-    ("journal_entries", "passbook_id", "INTEGER"),
-    ("journal_entries", "passbook_import_id", "INTEGER"),
 ]
+
+# 使わなくなったテーブル・列。既存の DB から取り除く。
+# 取り込んだ仕訳そのものは通常の仕訳として残る。
+REMOVED_TABLES = ("passbook_imports", "passbooks", "settings")
+REMOVED_COLUMNS = (("journal_entries", "passbook_id"), ("journal_entries", "passbook_import_id"))
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -226,6 +190,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    _drop_removed(conn)
+
+
+def _drop_removed(conn: sqlite3.Connection) -> None:
+    for table in REMOVED_TABLES:
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+    for table, column in REMOVED_COLUMNS:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        if not exists:
+            continue
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column in cols:
+            # DROP COLUMN は比較的新しい SQLite の機能。使えなくても
+            # 使われない列が残るだけなので、失敗しても処理は続ける。
+            try:
+                conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+            except sqlite3.Error:
+                pass
 
 
 def init_db() -> None:
