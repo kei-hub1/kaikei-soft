@@ -187,7 +187,8 @@ def test_csv_roundtrip(client):
     files = {"file": ("journal.csv", io.BytesIO(r.content), "text/csv")}
     dry = client.post(f"/api/clients/{cl2['id']}/import/journal", params={"dry_run": True}, files=files)
     assert dry.status_code == 200, dry.text
-    assert dry.json() == {"count": 4, "lines": 6, "skipped": 0, "dry_run": True, "skipped_samples": []}
+    assert dry.json() == {"count": 4, "lines": 6, "skipped": 0, "dry_run": True,
+                          "skipped_samples": [], "sub_applied": 0, "sub_label": ""}
     files = {"file": ("journal.csv", io.BytesIO(r.content), "text/csv")}
     imp = client.post(f"/api/clients/{cl2['id']}/import/journal", files=files)
     assert imp.status_code == 200, imp.text
@@ -827,12 +828,15 @@ def _csv_row(date, dcode, ccode, amount, tax="00", desc="", memo="", vno=""):
     return f"{date},{vno},{dcode},,,,,{ccode},,,,,{amount},{tax},,{desc},{memo}"
 
 
-def _upload_csv(client, cl, lines, dry_run=False):
+def _upload_csv(client, cl, lines, dry_run=False, sub_id=None):
     text = "\ufeff日付,伝票番号,借方科目コード,借方科目名,借方補助コード,借方補助名,借方部門コード," \
            "貸方科目コード,貸方科目名,貸方補助コード,貸方補助名,貸方部門コード,金額,消費税区分,消費税額,摘要,伝票メモ\r\n"
     text += "\r\n".join(lines) + "\r\n"
     files = {"file": ("bank.csv", io.BytesIO(text.encode("utf-8")), "text/csv")}
-    r = client.post(f"/api/clients/{cl['id']}/import/journal", params={"dry_run": dry_run}, files=files)
+    params = {"dry_run": dry_run}
+    if sub_id:
+        params["sub_id"] = sub_id
+    r = client.post(f"/api/clients/{cl['id']}/import/journal", params=params, files=files)
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -924,3 +928,72 @@ def test_csv_import_keeps_genuinely_repeated_transactions(client):
     r = _upload_csv(client, cl, twice * 2)
     assert (r["count"], r["skipped"]) == (2, 2)          # 4 件のうち登録済み 2 件を超える分だけ入る
     assert len(_entries(client, fy)) == 4
+
+
+def _add_sub(client, acc, code, name):
+    r = client.post(f"/api/accounts/{acc['id']}/sub-accounts", json={"code": code, "name": name})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_csv_import_assigns_one_sub_account_to_the_whole_file(client):
+    """通帳ごとに CSV を分けて取り込むとき、補助科目を一括で付けられる。"""
+    cl, fy, acc = make_client(client)
+    bank = acc["111"]                      # 普通預金
+    a = _add_sub(client, bank, "01", "A銀行")
+    b = _add_sub(client, bank, "02", "B銀行")
+    d = fy["start_date"]
+    rows = [_csv_row(d, "111", "400", 50000, desc="振込 ヤマダ"),      # 入金 (借方が普通預金)
+            _csv_row(d, "617", "111", 3300, desc="口座振替")]          # 出金 (貸方が普通預金)
+
+    r = _upload_csv(client, cl, rows, dry_run=True, sub_id=a["id"])
+    assert (r["sub_applied"], r["sub_label"]) == (2, "111 普通預金 / A銀行")
+    r = _upload_csv(client, cl, rows, sub_id=a["id"])
+    assert (r["count"], r["sub_applied"]) == (2, 2)
+    lines = [l for e in _entries(client, fy) for l in e["lines"]]
+    assert [(l["debit_sub_name"], l["credit_sub_name"]) for l in lines] == [("A銀行", None), (None, "A銀行")]
+
+    # 同じ内容でも別の通帳なら取り込む (補助科目で区別する)
+    r = _upload_csv(client, cl, rows, sub_id=b["id"])
+    assert (r["count"], r["skipped"]) == (2, 0)
+    # 同じ通帳をもう一度なら飛ばす。飛ばした分は「付けた行数」にも数えない
+    r = _upload_csv(client, cl, rows, sub_id=b["id"])
+    assert (r["count"], r["skipped"], r["sub_applied"]) == (0, 2, 0)
+    assert len(_entries(client, fy)) == 4
+
+
+def test_csv_import_sub_account_does_not_override_the_csv(client):
+    """CSV に補助科目が書いてあれば、そちらを優先する。"""
+    cl, fy, acc = make_client(client)
+    bank = acc["111"]
+    a = _add_sub(client, bank, "01", "A銀行")
+    _add_sub(client, bank, "02", "B銀行")
+    d = fy["start_date"]
+    # 借方補助コードに 02 を書いた行 (列位置: 日付,伝票番号,借方科目コード,借方科目名,借方補助コード,...)
+    row = f"{d},,111,,02,,,400,,,,,50000,00,,振込,"
+    r = _upload_csv(client, cl, [row], sub_id=a["id"])
+    assert (r["count"], r["sub_applied"]) == (1, 0)
+    assert _entries(client, fy)[0]["lines"][0]["debit_sub_name"] == "B銀行"
+
+
+def test_csv_import_reports_when_the_sub_account_matches_nothing(client):
+    """指定した補助科目の科目が CSV に出てこないときは、件数 0 で知らせる。"""
+    cl, fy, acc = make_client(client)
+    a = _add_sub(client, acc["111"], "01", "A銀行")
+    d = fy["start_date"]
+    r = _upload_csv(client, cl, [_csv_row(d, "100", "500", 10000, desc="現金売上")], dry_run=True, sub_id=a["id"])
+    assert (r["count"], r["sub_applied"]) == (1, 0)
+
+
+def test_csv_import_rejects_an_unknown_sub_account(client):
+    cl, fy, acc = make_client(client)
+    cl2, _, _ = make_client(client, code="002")
+    a = _add_sub(client, acc["111"], "01", "A銀行")
+    d = fy["start_date"]
+    text = "日付,伝票番号,借方科目コード,借方科目名,借方補助コード,借方補助名,借方部門コード," \
+           "貸方科目コード,貸方科目名,貸方補助コード,貸方補助名,貸方部門コード,金額,消費税区分,消費税額,摘要,伝票メモ\r\n"
+    files = {"file": ("x.csv", io.BytesIO(text.encode("utf-8")), "text/csv")}
+    # 別の顧問先の補助科目は使えない
+    r = client.post(f"/api/clients/{cl2['id']}/import/journal", params={"sub_id": a["id"]}, files=files)
+    assert r.status_code == 400
+    assert "補助科目" in r.json()["detail"]

@@ -129,7 +129,14 @@ def _to_int(s: str, default: int | None = 0) -> int | None:
 
 
 @router.post("/clients/{client_id}/import/journal")
-async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = False):
+async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = False,
+                             sub_id: int | None = None):
+    """仕訳 CSV を取り込む。
+
+    sub_id を渡すと、その補助科目が属する科目の行で補助科目が空のものに、
+    まとめてその補助科目を付ける。通帳ごとに CSV を分けて取り込むときに、
+    CSV へ補助科目の列を用意しなくて済むようにするため。
+    """
     text = _decode(await file.read())
     reader = csv.reader(io.StringIO(text))
     try:
@@ -153,6 +160,14 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
         sub_by = {(s["account_id"], s["code"]): s["id"] for s in subs}
         sub_by_name = {(s["account_id"], s["name"]): s["id"] for s in subs}
         depts = {d["code"]: d["id"] for d in conn.execute("SELECT id, code FROM departments WHERE client_id=?", (client_id,)).fetchall()}
+        fixed_sub = None
+        if sub_id:
+            fixed_sub = conn.execute(
+                "SELECT s.id, s.account_id, s.code, s.name, a.code AS acode, a.name AS aname "
+                "FROM sub_accounts s JOIN accounts a ON a.id=s.account_id WHERE s.id=? AND a.client_id=?",
+                (sub_id, client_id)).fetchone()
+            if fixed_sub is None:
+                raise HTTPException(400, "指定された補助科目が見つかりません")
 
     def resolve_account(code: str, name: str, rowno: int, side: str) -> int | None:
         if not code and not name:
@@ -174,6 +189,7 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
 
     groups: dict[tuple, EntryIn] = {}
     order: list[tuple] = []
+    applied_by_key: dict[tuple, int] = {}   # 補助科目を補った行数 (伝票ごと)
     for rowno, row in enumerate(reader, 2):
         if not any(c.strip() for c in row):
             continue
@@ -186,10 +202,21 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
         if tax_cls not in TAX_CLASS_MAP:
             raise HTTPException(400, f"{rowno} 行目: 消費税区分 '{tax_cls}' が不正です")
         tax_amt_s = col(row, "消費税額")
+        dr_sub = resolve_sub(dr, col(row, "借方補助コード"), col(row, "借方補助名"), rowno, "借方")
+        cr_sub = resolve_sub(cr, col(row, "貸方補助コード"), col(row, "貸方補助名"), rowno, "貸方")
+        # 指定された補助科目を、その科目の行で補助科目が空のものにだけ付ける。
+        # CSV に補助科目が書いてあれば、そちらを優先する。
+        if fixed_sub is not None:
+            if dr == fixed_sub["account_id"] and dr_sub is None:
+                dr_sub = fixed_sub["id"]
+                applied_by_key[key] = applied_by_key.get(key, 0) + 1
+            if cr == fixed_sub["account_id"] and cr_sub is None:
+                cr_sub = fixed_sub["id"]
+                applied_by_key[key] = applied_by_key.get(key, 0) + 1
         line = LineIn(
-            debit_account_id=dr, debit_sub_id=resolve_sub(dr, col(row, "借方補助コード"), col(row, "借方補助名"), rowno, "借方"),
+            debit_account_id=dr, debit_sub_id=dr_sub,
             debit_dept_id=depts.get(col(row, "借方部門コード")) if col(row, "借方部門コード") else None,
-            credit_account_id=cr, credit_sub_id=resolve_sub(cr, col(row, "貸方補助コード"), col(row, "貸方補助名"), rowno, "貸方"),
+            credit_account_id=cr, credit_sub_id=cr_sub,
             credit_dept_id=depts.get(col(row, "貸方部門コード")) if col(row, "貸方部門コード") else None,
             amount=_to_int(col(row, "金額")) or 0, tax_class=tax_cls,
             tax_amount=_to_int(tax_amt_s, None) if tax_amt_s else None,
@@ -212,18 +239,23 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
     # 同じ日に同じ金額・同じ摘要の取引が本当に 2 回あることは珍しくないため。
     fresh: list[EntryIn] = []
     skipped: list[EntryIn] = []
-    for e, v in zip(entries, validated):
+    sub_applied = 0
+    for key, e, v in zip(order, entries, validated):
         fp = _fingerprint(e.entry_date, e.memo, v["lines"])
         if existing.get(fp, 0) > 0:
             existing[fp] -= 1
             skipped.append(e)
         else:
             fresh.append(e)
+            sub_applied += applied_by_key.get(key, 0)
 
     result = {
         "count": len(fresh), "lines": sum(len(e.lines) for e in fresh),
         "skipped": len(skipped), "dry_run": dry_run,
         "skipped_samples": [_entry_label(e) for e in skipped[:20]],
+        "sub_applied": sub_applied,
+        "sub_label": (f'{fixed_sub["acode"]} {fixed_sub["aname"]} / {fixed_sub["name"]}'
+                      if fixed_sub is not None else ""),
     }
     if dry_run:
         return result
@@ -233,13 +265,19 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
 
 
 def _fingerprint(entry_date: str, memo: str, lines: list[dict]) -> tuple:
-    """重複判定に使うキー: 日付と、各行の金額・摘要。
+    """重複判定に使うキー: 日付と、各行の金額・摘要・補助科目。
 
-    科目・補助科目・部門・消費税区分・税額・伝票メモ・伝票番号は比較しない。
+    科目・部門・消費税区分・税額・伝票メモ・伝票番号は比較しない。
     通帳から取り込んだ仕訳は後で科目を付け替えるのが前提で、付け替えた後に
     同じ期間を取り込み直しても重ならないようにするため。
+
+    補助科目 (通帳) だけは比較に含める。通帳ごとに CSV を分けて取り込むとき、
+    別々の口座に同じ日・同じ金額・同じ摘要の入出金があっても、
+    片方が取り込まれないということが起きないようにするため。
     """
-    return (entry_date, tuple((l["amount"], l["description"].strip()) for l in lines))
+    return (entry_date, tuple(
+        (l["amount"], l["description"].strip(), l["debit_sub_id"], l["credit_sub_id"])
+        for l in lines))
 
 
 def _existing_fingerprints(conn, client_id: int, dates: list[str]) -> dict[tuple, int]:
@@ -248,7 +286,7 @@ def _existing_fingerprints(conn, client_id: int, dates: list[str]) -> dict[tuple
         return {}
     rows = conn.execute(
         """
-        SELECT e.id, e.entry_date, e.memo, l.amount, l.description
+        SELECT e.id, e.entry_date, e.memo, l.amount, l.description, l.debit_sub_id, l.credit_sub_id
         FROM journal_entries e JOIN journal_lines l ON l.entry_id=e.id
         WHERE e.client_id=? AND e.entry_date>=? AND e.entry_date<=?
         ORDER BY e.id, l.line_no

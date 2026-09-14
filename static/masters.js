@@ -21,6 +21,17 @@ const field = (label, inner, wide = false) => `<label class="field${wide ? ' wid
 const textInput = (name, value = '', attrs = '') => `<input type="text" name="${name}" value="${esc(value)}" ${attrs}>`;
 const selectInput = (name, options, value) => `<select name="${name}">${options.map(o => `<option value="${esc(o.value)}" ${String(o.value) === String(value) ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
 const checkInput = (name, checked) => `<input type="checkbox" name="${name}" ${checked ? 'checked' : ''}>`;
+
+/** 補助科目の選択リスト。科目ごとにまとめて出す。 */
+function subPickerHtml(id) {
+  const groups = S.accounts
+    .filter(a => (S.subsByAccount[a.id] || []).some(x => x.active))
+    .map(a => `<optgroup label="${esc(a.code)} ${esc(a.name)}">` +
+      (S.subsByAccount[a.id] || []).filter(x => x.active)
+        .map(x => `<option value="${x.id}">${esc(x.code)} ${esc(x.name)}</option>`).join('') + '</optgroup>').join('');
+  if (!groups) return '<select disabled><option>補助科目が登録されていません</option></select>';
+  return `<select id="${id}"><option value="">(指定しない)</option>${groups}</select>`;
+}
 // ---------------------------------------------------------------- 勘定科目
 routes.accounts = async function (main) {
   // 編集中の行データ。id が null の行は新規追加。
@@ -895,7 +906,9 @@ routes.data = async function (main) {
       <a class="btn" href="/api/fiscal-years/${S.fy ? S.fy.id : 0}/export/journal.csv">仕訳 CSV をダウンロード</a>` : '<p class="muted">顧問先を選択してください</p>'}
     </div>
     <div class="panel"><h3 style="margin-top:0">仕訳 CSV 取込</h3>
-      ${hasClient ? `<p>本ソフトで出力した形式の CSV を取り込みます (UTF-8 / Shift_JIS)。科目はコードまたは科目名で照合します。同じ「日付+伝票番号」の行は 1 伝票にまとめます。<br><b>日付・金額・摘要が同じ伝票が既にあれば取り込みません。</b>科目や消費税区分は比較しないので、取り込んだ後に科目を付け替えた仕訳があっても、同じ通帳履歴をもう一度取り込んで二重計上になることはありません。</p>
+      ${hasClient ? `<p>本ソフトで出力した形式の CSV を取り込みます (UTF-8 / Shift_JIS)。科目はコードまたは科目名で照合します。同じ「日付+伝票番号」の行は 1 伝票にまとめます。<br><b>日付・金額・摘要・補助科目が同じ伝票が既にあれば取り込みません。</b>科目や消費税区分は比較しないので、取り込んだ後に科目を付け替えた仕訳があっても、同じ通帳履歴をもう一度取り込んで二重計上になることはありません。</p><p class="help">下の欄で補助科目を選ぶと、<b>その補助科目が属する科目の行で補助科目が空のものに、まとめて付けます</b> (CSV に補助科目が書いてあればそちらが優先)。通帳ごとに CSV を分けて取り込むときに使います。補助科目で通帳を区別するので、別々の口座に同じ日・同じ金額・同じ摘要の入出金があっても、片方だけ取り込まれないということは起きません。</p>
+      <div class="row" style="margin-bottom:6px"><label class="field" style="flex:1;min-width:260px"><span>補助科目をまとめて付ける (通帳ごとに CSV を分けるとき)</span>
+        ${subPickerHtml('i-sub')}</label></div>
       <div class="row"><input type="file" id="i-file" accept=".csv,text/csv"><button id="i-check">検証</button><button id="i-run" class="primary">取込</button></div>
       <div id="i-result" style="margin-top:8px"></div>
       <details style="margin-top:8px"><summary class="muted">CSV の列</summary><code style="font-size:11px">日付, 伝票番号, 借方科目コード, 借方科目名, 借方補助コード, 借方補助名, 借方部門コード, 貸方科目コード, 貸方科目名, 貸方補助コード, 貸方補助名, 貸方部門コード, 金額, 消費税区分, 消費税額, 摘要, 伝票メモ</code></details>` : '<p class="muted">顧問先を選択してください</p>'}
@@ -917,8 +930,14 @@ routes.data = async function (main) {
     const res = $('#i-result');
     res.innerHTML = '処理中...';
     try {
-      const r = await api('POST', `/api/clients/${S.client.id}/import/journal?dry_run=${dry}`, fd);
+      const subId = $('#i-sub') ? $('#i-sub').value : '';
+      const r = await api('POST', `/api/clients/${S.client.id}/import/journal?dry_run=${dry}${subId ? `&sub_id=${subId}` : ''}`, fd);
       let html = `<span class="badge ok">${dry ? '検証OK' : '取込完了'}</span> ${r.count} 伝票 / ${r.lines} 行`;
+      if (r.sub_label && r.sub_applied) {
+        html += ` <span class="badge ok">${esc(r.sub_label)} を ${r.sub_applied} 行に付け${dry ? 'ます' : 'ました'}</span>`;
+      } else if (r.sub_label && r.count) {
+        html += ` <span class="badge warn">${esc(r.sub_label)} を付ける行がありませんでした (科目が一致しません)</span>`;
+      }
       if (r.skipped) {
         const more = r.skipped > r.skipped_samples.length ? `<li class="muted">…ほか ${r.skipped - r.skipped_samples.length} 件</li>` : '';
         html += ` <span class="badge">${r.skipped} 伝票は登録済みのため${dry ? '取り込みません' : '飛ばしました'}</span>
