@@ -1,30 +1,70 @@
 @echo off
 chcp 932 >nul
-rem 必要なライブラリをインストールします（初回のみ実行してください）
+setlocal
 cd /d "%~dp0"
-echo ライブラリをインストールしています。しばらくお待ちください...
+title 定型文書作成ツール　初回セットアップ
+
+rem ============================================================
+rem  必要なライブラリのインストール（初回のみ）
+rem ============================================================
+
+set "PY="
+
+py -3 -c "import sys" >nul 2>&1
+if not errorlevel 1 (
+    set "PY=py -3"
+    goto :found
+)
+python -c "import sys" >nul 2>&1
+if not errorlevel 1 (
+    set "PY=python"
+    goto :found
+)
+
 echo.
-where python >nul 2>&1
-if %errorlevel%==0 (
-    python -m pip install --upgrade pip
-    python -m pip install -r requirements.txt
-    goto done
-)
-where py >nul 2>&1
-if %errorlevel%==0 (
-    py -m pip install --upgrade pip
-    py -m pip install -r requirements.txt
-    goto done
-)
-echo Python が見つかりません。Python をインストールしてから、もう一度実行してください。
+echo   Python が見つかりません。
+echo.
+echo   python.org から Python をインストールしてください。
+echo   インストール画面で「Add python.exe to PATH」に必ずチェックを入れてください。
+echo.
+echo   https://www.python.org/downloads/windows/
+echo.
 pause
 exit /b 1
 
-:done
+:found
 echo.
-if %errorlevel%==0 (
-    echo セットアップが完了しました。「起動.bat」をダブルクリックして起動してください。
-) else (
-    echo インストールに失敗しました。インターネット接続を確認して、もう一度実行してください。
+echo   使用する Python：
+%PY% -c "import sys; print('   ' + sys.executable); print('   バージョン ' + sys.version.split()[0])"
+echo.
+echo   ライブラリをインストールしています。しばらくお待ちください...
+echo.
+
+%PY% -m pip install --upgrade pip
+%PY% -m pip install -r requirements.txt
+if errorlevel 1 (
+    echo.
+    echo   インストールに失敗しました。
+    echo   インターネットに接続されているか確認して、もう一度実行してください。
+    echo.
+    pause
+    exit /b 1
 )
+
+echo.
+echo   インストール結果を確認しています...
+%PY% -c "import docx, tkinter" >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo   確認できませんでした。「診断.bat」をダブルクリックして原因をお知らせください。
+    echo.
+    pause
+    exit /b 1
+)
+
+echo.
+echo   セットアップが完了しました。
+echo   「起動.bat」をダブルクリックして起動してください。
+echo.
 pause
+exit /b 0

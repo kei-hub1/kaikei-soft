@@ -46,6 +46,18 @@ class App(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.tab_main.on_show()
+        self.after(50, self._bring_to_front)
+
+    def _bring_to_front(self) -> None:
+        """他のウィンドウの後ろに隠れないよう、起動直後に最前面へ出す。"""
+        try:
+            self.deiconify()
+            self.lift()
+            self.attributes("-topmost", True)
+            self.after(400, lambda: self.attributes("-topmost", False))
+            self.focus_force()
+        except tk.TclError:
+            pass
 
     def _setup_fonts(self) -> None:
         for name in ("TkDefaultFont", "TkTextFont", "TkFixedFont", "TkMenuFont", "TkHeadingFont"):
