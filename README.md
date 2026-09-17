@@ -141,7 +141,7 @@ A4縦・横書き、MS 明朝、本文 10.5pt、件名 12pt 太字、余白 25mm
 
 | 原因 | 見分け方 | 対処 |
 |---|---|---|
-| zip を解凍していない | フォルダを開いたときアドレス欄に zip 名が残っている | zip を右クリック →「すべて展開」してから実行する |
+| zip を解凍していない | 画面に `Temp\...zip...\診断.py: No such file or directory` のようなパスが出る。アドレス欄に zip 名が残っている | zip を右クリック →「すべて展開」してから、展開先のフォルダで実行する |
 | Python が入っていない／PATH に無い | 診断で「Python が見つかりません」 | [python.org](https://www.python.org/downloads/windows/) からインストール。**「Add python.exe to PATH」にチェック**。Microsoft Store 版は不可 |
 | tkinter が入っていない | 診断で「tkinter」が NG | Python を入れ直し、インストール画面で **「tcl/tk and IDLE」にチェック** |
 | ライブラリ未インストール | 診断で「python-docx」が NG | `初回セットアップ.bat` を実行 |

@@ -4,14 +4,13 @@ setlocal
 cd /d "%~dp0"
 title ’èŒ^•¶‘ì¬ƒc[ƒ‹
 
-rem ============================================================
-rem  ’èŒ^•¶‘ì¬ƒc[ƒ‹@‹N“®
-rem ============================================================
+rem --- zip ‚Ì’†‚©‚çŽÀs‚³‚ê‚Ä‚¢‚È‚¢‚©Šm”F ---
+if not exist "%~dp0main.py" goto :nofiles
 
 set "PY="
 set "PYW="
 
-rem --- Python ‚ð’T‚·ipy ƒ‰ƒ“ƒ`ƒƒ[ ¨ python ‚Ì‡j---
+rem --- Python ‚ð’T‚·kpy ƒ‰ƒ“ƒ`ƒƒ[ ¨ python ‚Ì‡l---
 py -3 -c "import sys" >nul 2>&1
 if not errorlevel 1 (
     set "PY=py -3"
@@ -24,7 +23,64 @@ if not errorlevel 1 (
     set "PYW=pythonw"
     goto :found
 )
+goto :nopython
 
+:found
+
+rem pyw ‚ª–³‚¢ŠÂ‹«‚Å‚Í py ‚Å‘ã—p‚·‚ék‚±‚Ìê‡‚Í•‚¢‰æ–Ê‚ªŽc‚è‚Ü‚·l
+where pyw >nul 2>&1
+if errorlevel 1 if "%PYW%"=="pyw -3" set "PYW=%PY%"
+
+rem --- ‰æ–Ê•\Ž¦‚Ì•”•i‚ðŠm”F ---
+%PY% -c "import tkinter" >nul 2>&1
+if errorlevel 1 goto :notk
+
+rem --- •K—v‚Èƒ‰ƒCƒuƒ‰ƒŠ‚ðŠm”F ---
+%PY% -c "import docx" >nul 2>&1
+if errorlevel 1 goto :nolib
+
+rem --- ‹N“® ---
+if exist "logs\‹N“®ƒGƒ‰[.txt" del "logs\‹N“®ƒGƒ‰[.txt" >nul 2>&1
+start "" %PYW% "%~dp0main.py"
+
+rem ‹N“®’¼Œã‚ÉŽ¸”s‚µ‚Ä‚¢‚È‚¢‚©Šm”F‚·‚ék–ñ3•b‘Ò‚Âl
+ping -n 4 127.0.0.1 >nul 2>&1
+if exist "logs\‹N“®ƒGƒ‰[.txt" goto :failed
+exit /b 0
+
+:notk
+echo.
+echo   Python ‚É tkinter k‰æ–Ê•\Ž¦‚Ì•”•il ‚ª“ü‚Á‚Ä‚¢‚È‚¢‚½‚ß‹N“®‚Å‚«‚Ü‚¹‚ñB
+echo.
+echo   python.org ‚©‚ç Python ‚ð“ü‚ê’¼‚µAƒCƒ“ƒXƒg[ƒ‹‰æ–Ê‚Å
+echo   utcl/tk and IDLEv‚Éƒ`ƒFƒbƒN‚ð“ü‚ê‚Ä‚­‚¾‚³‚¢B
+echo.
+pause
+exit /b 1
+
+:nolib
+echo.
+echo   •K—v‚Èƒ‰ƒCƒuƒ‰ƒŠ‚ªƒCƒ“ƒXƒg[ƒ‹‚³‚ê‚Ä‚¢‚Ü‚¹‚ñB
+echo.
+echo   æ‚Éu‰‰ñƒZƒbƒgƒAƒbƒv.batv‚ðƒ_ƒuƒ‹ƒNƒŠƒbƒN‚µ‚Ä‚­‚¾‚³‚¢B
+echo.
+pause
+exit /b 1
+
+:failed
+echo.
+echo   ‹N“®‚ÉŽ¸”s‚µ‚Ü‚µ‚½B——R‚ÍŽŸ‚Ì‚Æ‚¨‚è‚Å‚·B
+echo   ----------------------------------------------------------
+type "logs\‹N“®ƒGƒ‰[.txt"
+echo.
+echo   ----------------------------------------------------------
+echo.
+echo   ‰ðŒˆ‚µ‚È‚¢ê‡‚Íuf’f.batv‚ðƒ_ƒuƒ‹ƒNƒŠƒbƒN‚µ‚Ä‚­‚¾‚³‚¢B
+echo.
+pause
+exit /b 1
+
+:nopython
 echo.
 echo   Python ‚ªŒ©‚Â‚©‚è‚Ü‚¹‚ñB
 echo.
@@ -33,58 +89,29 @@ echo   ƒCƒ“ƒXƒg[ƒ‹‰æ–Ê‚ÅuAdd python.exe to PATHv‚É•K‚¸ƒ`ƒFƒbƒN‚ð“ü‚ê‚Ä‚­‚¾‚³‚
 echo.
 echo   https://www.python.org/downloads/windows/
 echo.
-echo   ¦ Microsoft Store ‚Ì Python ‚Å‚Í“®‚©‚È‚¢‚±‚Æ‚ª‚ ‚è‚Ü‚·B
+echo   ¦ Microsoft Store ”Å‚Ì Python ‚Å‚Í“®‚©‚È‚¢‚±‚Æ‚ª‚ ‚è‚Ü‚·B
 echo.
 pause
 exit /b 1
 
-:found
-rem pyw ‚ª–³‚¢ŠÂ‹«‚Å‚Í py ‚Å‘ã—p‚·‚éi‚±‚Ìê‡‚Í•‚¢‰æ–Ê‚ªŽc‚è‚Ü‚·j
-where pyw >nul 2>&1
-if errorlevel 1 if "%PYW%"=="pyw -3" set "PYW=%PY%"
-
-rem --- ‰æ–Ê•\Ž¦‚Ì•”•i‚ðŠm”F ---
-%PY% -c "import tkinter" >nul 2>&1
-if errorlevel 1 (
-    echo.
-    echo   Python ‚É tkinter k‰æ–Ê•\Ž¦‚Ì•”•il ‚ª“ü‚Á‚Ä‚¢‚È‚¢‚½‚ß‹N“®‚Å‚«‚Ü‚¹‚ñB
-    echo.
-    echo   python.org ‚©‚ç Python ‚ð“ü‚ê’¼‚µAƒCƒ“ƒXƒg[ƒ‹‰æ–Ê‚Å
-    echo   utcl/tk and IDLEv‚Éƒ`ƒFƒbƒN‚ð“ü‚ê‚Ä‚­‚¾‚³‚¢B
-    echo.
-    pause
-    exit /b 1
-)
-
-rem --- •K—v‚Èƒ‰ƒCƒuƒ‰ƒŠ‚ðŠm”F ---
-%PY% -c "import docx" >nul 2>&1
-if errorlevel 1 (
-    echo.
-    echo   •K—v‚Èƒ‰ƒCƒuƒ‰ƒŠ‚ªƒCƒ“ƒXƒg[ƒ‹‚³‚ê‚Ä‚¢‚Ü‚¹‚ñB
-    echo.
-    echo   æ‚Éu‰‰ñƒZƒbƒgƒAƒbƒv.batv‚ðƒ_ƒuƒ‹ƒNƒŠƒbƒN‚µ‚Ä‚­‚¾‚³‚¢B
-    echo.
-    pause
-    exit /b 1
-)
-
-rem --- ‹N“® ---
-if exist "logs\‹N“®ƒGƒ‰[.txt" del "logs\‹N“®ƒGƒ‰[.txt" >nul 2>&1
-start "" %PYW% "%~dp0main.py"
-
-rem ‹N“®’¼Œã‚ÉŽ¸”s‚µ‚Ä‚¢‚È‚¢‚©Šm”F‚·‚éi–ñ3•b‘Ò‚Âj
-ping -n 4 127.0.0.1 >nul 2>&1
-if exist "logs\‹N“®ƒGƒ‰[.txt" (
-    echo.
-    echo   ‹N“®‚ÉŽ¸”s‚µ‚Ü‚µ‚½B——R‚ÍŽŸ‚Ì‚Æ‚¨‚è‚Å‚·B
-    echo   ----------------------------------------------------------
-    type "logs\‹N“®ƒGƒ‰[.txt"
-    echo.
-    echo   ----------------------------------------------------------
-    echo.
-    echo   ‰ðŒˆ‚µ‚È‚¢ê‡‚Íuf’f.batv‚ðƒ_ƒuƒ‹ƒNƒŠƒbƒN‚µ‚Ä‚­‚¾‚³‚¢B
-    echo.
-    pause
-    exit /b 1
-)
-exit /b 0
+:nofiles
+echo.
+echo   ============================================================
+echo    zip ‚ð‰ð“€‚¹‚¸‚ÉŽÀs‚µ‚Ä‚¢‚é‚½‚ßA‹N“®‚Å‚«‚Ü‚¹‚ñB
+echo   ============================================================
+echo.
+echo   ¡‚±‚Ìƒtƒ@ƒCƒ‹‚ª‚ ‚éêŠF
+echo   %~dp0
+echo.
+echo   zip ‚ðŠJ‚¢‚½‚Ü‚Ü’†‚Ì bat ‚ðƒ_ƒuƒ‹ƒNƒŠƒbƒN‚·‚é‚ÆA
+echo   ‚±‚Ì bat ‚¾‚¯‚ªˆêŽžƒtƒHƒ‹ƒ_‚ÉƒRƒs[‚³‚ê‚ÄŽÀs‚³‚ê‚Ü‚·B
+echo   ƒAƒvƒŠ–{‘Ìkmain.py ‚È‚Çl‚ª–³‚¢‚½‚ß“®‚«‚Ü‚¹‚ñB
+echo.
+echo   y‘Îˆz
+echo    1. ƒ_ƒEƒ“ƒ[ƒh‚µ‚½u’èŒ^•¶‘ì¬ƒc[ƒ‹.zipv‚ð‰EƒNƒŠƒbƒN
+echo    2. u‚·‚×‚Ä“WŠJv‚ð‘I‚Ô
+echo    3. “WŠJæk—á C:\’èŒ^•¶‘ì¬ƒc[ƒ‹l‚ÌƒtƒHƒ‹ƒ_‚ðŠJ‚­
+echo    4. ‚»‚Ì’†‚Ìu‰‰ñƒZƒbƒgƒAƒbƒv.batv¨u‹N“®.batv‚Ì‡‚ÉŽÀs‚·‚é
+echo.
+pause
+exit /b 1
