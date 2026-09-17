@@ -118,6 +118,8 @@ function makeSuggest(input, options) {
  *   options.onCommit : (item|null) => void   Enter で確定した時に呼ばれる (null = 空で確定)
  *   options.onChange : (item|null) => void   選択が変わった時
  *   options.allowEmpty : 空を許すか (既定 true)
+ *   options.openOnFocus : カーソルが入ったら候補一覧を開くか (既定 false)
+ *                         補助科目のように「何が選べるか」をその場で示したい欄で使う
  * input.dataset.id に選択 id を保持する。
  */
 function makeCombo(input, options) {
@@ -133,6 +135,8 @@ function makeCombo(input, options) {
   let filtered = [];
   let hl = -1;
   let lastLabel = '';
+  // 上下キーで候補を選んだかどうか。候補が開いているだけの状態と区別する。
+  let navigated = false;
 
   const label = (it) => it ? (it.code ? `${it.code} ${it.name}` : it.name) : '';
   const norm = (s) => (s || '').toString().toLowerCase()
@@ -164,9 +168,10 @@ function makeCombo(input, options) {
   function open(q) {
     filtered = filter(q);
     hl = filtered.length ? 0 : -1;
+    navigated = false;
     renderDD();
   }
-  function close() { dd.classList.remove('open'); dd.innerHTML = ''; filtered = []; hl = -1; }
+  function close() { dd.classList.remove('open'); dd.innerHTML = ''; filtered = []; hl = -1; navigated = false; }
 
   function select(it, commit) {
     const prev = input.dataset.id || '';
@@ -196,6 +201,9 @@ function makeCombo(input, options) {
   input.addEventListener('focus', () => {
     lastLabel = input.value;
     selectAllOnFocus(input);
+    // 補助科目などは、カーソルが入った時点で候補を出す。
+    // 既に選んである場合は絞り込まずに全件出し、その場で選び直せるようにする。
+    if (options.openOnFocus && !input.disabled) open(input.dataset.id ? '' : input.value);
   });
   input.addEventListener('input', () => {
     input.dataset.id = '';
@@ -205,13 +213,18 @@ function makeCombo(input, options) {
     if (e.key === 'ArrowDown') {
       if (!dd.classList.contains('open')) { open(''); }
       else if (hl < filtered.length - 1) { hl++; renderDD(); }
+      navigated = filtered.length > 0;
       e.preventDefault();
     } else if (e.key === 'ArrowUp') {
       if (hl > 0) { hl--; renderDD(); }
+      navigated = filtered.length > 0;
       e.preventDefault();
     } else if (e.key === 'Enter') {
       e.preventDefault();
       e.stopPropagation();
+      // 上下キーで候補を選んでいれば、入力欄の文字や選択済みの内容に関わらずそれを確定する。
+      // 補助科目のようにカーソルが入ると候補が開く欄で、打たずに選べるようにするため。
+      if (navigated && hl >= 0 && filtered[hl]) { select(filtered[hl], true); return; }
       const q = input.value.trim();
       if (!q) {
         if (options.allowEmpty === false && input.dataset.id) { close(); return; }

@@ -54,6 +54,7 @@ function createEntryForm(root, opts = {}) {
     <div class="help">
       <kbd>Enter</kbd> 次の項目 / <kbd>Shift+Enter</kbd> 前の項目 / 科目はコード・かな・名称で検索 <kbd>↑↓</kbd> で選択 /
       金額欄で空欄のまま <kbd>Enter</kbd> → 差額を入力 / 摘要欄で <kbd>Enter</kbd> → 貸借一致なら${inDialog ? '保存' : '登録'}、不一致なら行追加 /
+      補助科目がある科目は確定すると候補が開くので <kbd>↑↓</kbd> と <kbd>Enter</kbd> で選択 (不要ならそのまま <kbd>Enter</kbd>) /
       <kbd>Ctrl+Del</kbd> 行削除 / 摘要は <kbd>F4</kbd> または入力で候補表示、コード入力 + <kbd>Enter</kbd> で展開
       ${inDialog ? '/ <kbd>Esc</kbd> 閉じる' : ''}
     </div>
@@ -128,8 +129,10 @@ function createEntryForm(root, opts = {}) {
     const st = { taxTouched: false, taxAmtTouched: false };
     tr._state = st;
 
-    const drSub = makeCombo(f('drsub'), { items: () => subItems(dr.id), onCommit: () => focusNext(f('drsub')) });
-    const crSub = makeCombo(f('crsub'), { items: () => subItems(cr.id), onCommit: () => focusNext(f('crsub')) });
+    // 補助科目はカーソルが入った時点で候補を出す。科目コードを打って Enter を押すと
+    // ここに移ってくるので、そのまま上下キーと Enter で補助科目を選べる。
+    const drSub = makeCombo(f('drsub'), { items: () => subItems(dr.id), openOnFocus: true, onCommit: () => focusNext(f('drsub')) });
+    const crSub = makeCombo(f('crsub'), { items: () => subItems(cr.id), openOnFocus: true, onCommit: () => focusNext(f('crsub')) });
     const dr = makeCombo(f('dr'), {
       items: accountItems,
       onChange: (it) => { drSub.clear(); updateSubState(f('drsub'), it); applyDefaultTax(); },
