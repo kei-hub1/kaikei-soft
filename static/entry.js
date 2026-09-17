@@ -13,6 +13,7 @@ function createEntryForm(root, opts = {}) {
   let editingId = null;      // 修正中の伝票 id
   let editingVno = null;
   let lastSaved = null;
+  let dirty = false;         // 読み込んでから手で触ったか (別の伝票へ移る前の確認に使う)
 
   root.innerHTML = `
   <div class="panel" id="entry-form">
@@ -63,6 +64,9 @@ function createEntryForm(root, opts = {}) {
   </div>`;
 
   const q = (sel) => $(sel, root);
+  // 画面から入力があったら「未保存の変更あり」。値を組み立てて入れる処理では発火しない。
+  root.addEventListener('input', () => { dirty = true; });
+  root.addEventListener('change', () => { dirty = true; });
   const tbody = q('#e-lines');
   const dateInput = q('#e-date');
   const memoInput = q('#e-memo');
@@ -371,6 +375,7 @@ function createEntryForm(root, opts = {}) {
     addLine({});
     if (!keepDate) setDate(S.fy.start_date);
     updateTotals();
+    dirty = false;
   }
   async function save() {
     if (!commitDate()) return;
@@ -390,6 +395,7 @@ function createEntryForm(root, opts = {}) {
         toast(`伝票 No.${res.voucher_no} を登録しました`);
       }
       lastSaved = res;
+      dirty = false;
       if (!inDialog) {
         resetForm(true);
         dateInput.focus();
@@ -411,6 +417,7 @@ function createEntryForm(root, opts = {}) {
     q('#e-delete').style.display = '';
     updateTotals();
     focusFirstLine();
+    dirty = false;
     if (!inDialog) window.scrollTo({ top: 0 });
   }
   function copyEntry(entry) {
@@ -561,6 +568,7 @@ function createEntryForm(root, opts = {}) {
     loadEntry, copyEntry, resetForm, save, deleteEntry, setDate, focusDate: () => dateInput.focus(),
     get editingId() { return editingId; },
     get currentDate() { return currentDate; },
+    get isDirty() { return dirty; },
     destroy() {
       document.removeEventListener('keydown', onAnyKeyDown, true);
       document.removeEventListener('keyup', onKeyUp, true);
@@ -571,32 +579,98 @@ function createEntryForm(root, opts = {}) {
 }
 
 /** 帳票の行から、その伝票を直接修正するダイアログを開く。 */
-async function openEntryDialog(entryId, { onChanged } = {}) {
-  let entry;
-  try {
-    entry = await GET(`/api/entries/${entryId}`);
-  } catch (e) { showError(e); return; }
+/** 帳票の行から、その伝票を直接修正するダイアログを開く。
+ *
+ *  siblings に帳票が今出している伝票 id を渡しておくと、ダイアログの中で
+ *  前後の仕訳へ移れる。摘要で絞り込んでまとめて直すときに、いちいち
+ *  閉じて次の行をクリックしなくて済む。
+ */
+async function openEntryDialog(entryId, { onChanged, siblings } = {}) {
   if (S.fy && S.fy.closed) { toast('この会計期間は締め切られています', true); return; }
+  // 同じ伝票が複数行に出る帳票もあるので、重複は取り除いて順序だけ残す
+  const list = [...new Set((siblings && siblings.length ? siblings : [entryId]).map(Number))];
+  let idx = list.indexOf(Number(entryId));
+  if (idx < 0) { list.unshift(Number(entryId)); idx = 0; }
 
   let form = null;
-  return modal(`<div style="width:min(1180px, 90vw)">
-    <h3 style="margin-bottom:8px">仕訳の修正　<span class="muted" style="font-weight:normal">伝票 No.${entry.voucher_no}　${esc(fmtDate(entry.entry_date))}</span></h3>
+  let closeModal = null;
+  const multi = list.length > 1;
+
+  const { bg, close } = modal(`<div style="width:min(1180px, 90vw)">
+    <div class="row between" style="align-items:baseline;margin-bottom:8px">
+      <h3 style="margin:0">仕訳の修正　<span class="muted" style="font-weight:normal" id="ed-sub"></span></h3>
+      ${multi ? `<div class="row" style="gap:6px">
+        <span class="muted" id="ed-pos"></span>
+        <button id="ed-prev">◀ 前の仕訳 <kbd>PageUp</kbd></button>
+        <button id="ed-next">次の仕訳 ▶ <kbd>PageDown</kbd></button></div>` : ''}
+    </div>
     <div id="ed-host"></div>
-    <div class="actions"><button data-close>閉じる</button></div>
+    <div class="actions">
+      ${multi ? '<span class="muted" style="margin-right:auto">保存すると次の仕訳へ進みます</span>' : ''}
+      <button data-close>閉じる</button></div>
     <div class="entry-dialog-space"></div>
   </div>`, {
-    onOpen(bg, closeModal) {
+    onOpen(bg, doClose) {
+      closeModal = doClose;
       form = createEntryForm($('#ed-host', bg), {
         inDialog: true,
         async onChanged() {
-          closeModal();
-          if (onChanged) await onChanged();
+          if (onChanged) await onChanged();      // 呼び出した帳票を引き直す
+          if (!(await load(idx + 1))) doClose();  // 次が無ければ閉じる
         },
       });
-      form.loadEntry(entry);
+      if (multi) {
+        $('#ed-prev', bg).onclick = () => go(-1);
+        $('#ed-next', bg).onclick = () => go(1);
+      }
     },
-    onClose() { if (form) form.destroy(); },
+    onClose() {
+      document.removeEventListener('keydown', onNavKey);
+      if (form) form.destroy();
+    },
   });
+
+  /** i 番目の伝票を読み込む。もう無ければ false。 */
+  async function load(i) {
+    while (i >= 0 && i < list.length) {
+      let entry;
+      try {
+        entry = await GET(`/api/entries/${list[i]}`);
+      } catch (e) {
+        list.splice(i, 1);        // 削除済みなどで読めない伝票は一覧から外して次へ
+        continue;
+      }
+      idx = i;
+      form.loadEntry(entry);
+      $('#ed-sub', bg).textContent = `伝票 No.${entry.voucher_no}　${fmtDate(entry.entry_date)}`;
+      if (multi) {
+        $('#ed-pos', bg).textContent = `${idx + 1} / ${list.length} 件`;
+        $('#ed-prev', bg).disabled = idx === 0;
+        $('#ed-next', bg).disabled = idx >= list.length - 1;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  async function go(delta) {
+    const next = idx + delta;
+    if (next < 0 || next >= list.length) return;
+    if (form.isDirty && !(await confirmDialog('保存していない変更があります。破棄して移動しますか？'))) return;
+    await load(next);
+  }
+
+  const onNavKey = (e) => {
+    if (e.key !== 'PageDown' && e.key !== 'PageUp') return;
+    const modals = $$('.modal-bg');
+    if (modals[modals.length - 1] !== bg) return;   // 手前に別のダイアログがある
+    e.preventDefault();
+    go(e.key === 'PageDown' ? 1 : -1);
+  };
+  if (multi) document.addEventListener('keydown', onNavKey);
+
+  if (!(await load(idx))) { close(); toast('仕訳が見つかりません', true); }
+  return { bg, close };
 }
 
 // ---------------------------------------------------------------- 仕訳入力画面

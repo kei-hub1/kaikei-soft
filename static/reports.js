@@ -66,25 +66,30 @@ routes.journal = async function (main, params) {
     ${printButton()} ${csvButton('j-csv')} ${backButtonHtml()}
   </div>
   <div class="panel"><div id="j-title"></div>
-  <div class="muted no-print" style="margin:2px 0 4px">行をクリックすると、その仕訳をこの画面のまま修正できます。</div>
+  <div class="muted no-print" style="margin:2px 0 4px">行をクリックすると、その仕訳をこの画面のまま修正できます。修正画面から前後の仕訳へそのまま移れます。</div>
   <div class="scroll-x"><table class="grid compact sticky-head" id="j-table"><thead><tr>
     <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th>${exempt ? '' : '<th>税区分</th><th>内消費税</th>'}<th>摘要</th>
   </tr></thead><tbody></tbody></table></div></div>`;
   // 開いた直後からコードを打てるよう、科目欄は入力欄 (コード・かな・名称で検索)
+  // 科目を変えたら摘要の絞り込みは外す。前の科目に合わせて入れた摘要が
+  // 残っていると、新しい科目では 1 件も出ない、ということが起きるため。
   const acctCombo = makeCombo($('#j-acct'), {
     items: () => S.accounts,
-    onCommit: () => { run(); $('#j-acct').select(); },
+    onChange: () => { $('#j-q').value = ''; run(); },
+    onCommit: () => { $('#j-acct').select(); },
   });
   if (params.account) acctCombo.set(Number(params.account));
   if (params.q) $('#j-q').value = params.q;
   if (params.sort) $('#j-sort').value = params.sort;
 
+  let shown = [];                          // いま表示している伝票 id (表示順)
   async function run() {
     const sort = $('#j-sort').value;
     const qs = new URLSearchParams({ fiscal_year_id: S.fy.id, date_from: $('#j-from').value, date_to: $('#j-to').value, limit: 5000, sort });
     if (acctCombo.id) qs.set('account_id', acctCombo.id);
     if ($('#j-q').value.trim()) qs.set('q', $('#j-q').value.trim());
     const r = await GET(`/api/clients/${S.client.id}/entries?${qs}`);
+    shown = r.entries.map(e => e.id);      // 修正ダイアログで前後に移れるようにする
     $('#j-title').innerHTML = reportHeader('仕訳帳', `${fmtDate($('#j-from').value)} 〜 ${fmtDate($('#j-to').value)}　${r.total} 伝票${sort === 'description' ? '　摘要順' : ''}`);
     let total = 0;
     const rows = [];
@@ -125,7 +130,7 @@ routes.journal = async function (main, params) {
   // 行をクリックしたら、その場で修正できるダイアログを開く
   $('#j-table').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-id]');
-    if (tr) openEntryDialog(Number(tr.dataset.id), { onChanged: run });
+    if (tr) openEntryDialog(Number(tr.dataset.id), { onChanged: run, siblings: shown });
   });
   await run();
   $('#j-acct').focus({ preventScroll: true });
@@ -160,12 +165,14 @@ routes.ledger = async function (main, params) {
     const subs = acctCombo.id ? (S.subsByAccount[acctCombo.id] || []) : [];
     subSel.innerHTML = '<option value="">(科目合計)</option>' + subs.map(s => `<option value="${s.id}">${esc(s.code)} ${esc(s.name)}</option>`).join('');
   }
+  let shown = [];                          // いま表示している伝票 id (表示順)
   async function run() {
-    if (!acctCombo.id) { $('#l-table tbody').innerHTML = '<tr><td colspan="8" class="empty">科目を選択してください</td></tr>'; return; }
+    if (!acctCombo.id) { $('#l-table tbody').innerHTML = '<tr><td colspan="8" class="empty">科目を選択してください</td></tr>'; shown = []; return; }
     const sort = $('#l-sort').value;
     const qs = new URLSearchParams({ account_id: acctCombo.id, date_from: $('#l-from').value, date_to: $('#l-to').value, sort });
     if (subSel.value) qs.set('sub_id', subSel.value);
     const r = await GET(`/api/fiscal-years/${S.fy.id}/reports/ledger?${qs}`);
+    shown = r.rows.map(x => x.entry_id);
     const a = r.account;
     $('#l-title').innerHTML = reportHeader(`${subSel.value ? '補助元帳' : '総勘定元帳'}　${a.code} ${a.name}${r.sub ? ' / ' + r.sub.name : ''}`,
       `${fmtDate($('#l-from').value)} 〜 ${fmtDate($('#l-to').value)}${sort === 'description' ? '　摘要順' : ''}`);
@@ -213,7 +220,7 @@ routes.ledger = async function (main, params) {
   // 修正・削除したら元帳を引き直して、残高も新しい内容で表示し直す。
   $('#l-table').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-id]');
-    if (tr) openEntryDialog(Number(tr.dataset.id), { onChanged: run });
+    if (tr) openEntryDialog(Number(tr.dataset.id), { onChanged: run, siblings: shown });
   });
   const init = params.account ? Number(params.account) : (S.accounts.find(a => a.code === '100') || S.accounts[0] || {}).id;
   if (init) { acctCombo.set(init); fillSubs(); }
