@@ -378,10 +378,11 @@ function createEntryForm(root, opts = {}) {
     updateTotals();
     dirty = false;
   }
+  /** 保存する。成功したら true、入力の不備などで保存できなければ false。 */
   async function save() {
-    if (!commitDate()) return;
+    if (!commitDate()) return false;
     const lines = $$('tr', tbody).map(lineData).filter(l => !l.empty);
-    if (!lines.length) { toast('仕訳行を入力してください', true); focusFirstLine(); return; }
+    if (!lines.length) { toast('仕訳行を入力してください', true); focusFirstLine(); return false; }
     const payload = { entry_date: currentDate, memo: memoInput.value.trim(), lines: lines.map(({ empty, ...l }) => l) };
     const saveBtn = q('#e-save');
     saveBtn.disabled = true;
@@ -402,7 +403,8 @@ function createEntryForm(root, opts = {}) {
         dateInput.focus();
       }
       await onChanged(res);
-    } catch (e) { showError(e); }
+      return true;
+    } catch (e) { showError(e); return false; }
     finally { saveBtn.disabled = false; }
   }
   function loadEntry(entry) {
@@ -635,6 +637,7 @@ async function openEntryDialog(entryId, { onChanged, siblings } = {}) {
 
   let form = null;
   let closeModal = null;
+  let pendingTarget = null;     // 保存が終わったら移りたい行 (前後ボタンで使う)
   const multi = list.length > 1;
 
   const { bg, close } = modal(`<div style="width:min(1180px, 90vw)">
@@ -647,7 +650,7 @@ async function openEntryDialog(entryId, { onChanged, siblings } = {}) {
     </div>
     <div id="ed-host"></div>
     <div class="actions">
-      ${multi ? '<span class="muted" style="margin-right:auto">保存すると次の仕訳へ進みます</span>' : ''}
+      ${multi ? '<span class="muted" style="margin-right:auto">保存すると次の仕訳へ進みます。前後へ移るときも、直した内容は保存されます</span>' : ''}
       <button data-close>閉じる</button></div>
     <div class="entry-dialog-space"></div>
   </div>`, {
@@ -657,7 +660,10 @@ async function openEntryDialog(entryId, { onChanged, siblings } = {}) {
         inDialog: true,
         async onChanged() {
           if (onChanged) await onChanged();      // 呼び出した帳票を引き直す
-          if (!(await load(idx + 1))) doClose();  // 次が無ければ閉じる
+          // 保存後に移る先。前後ボタンで保存した場合はその行、ふつうに保存したら次の行
+          const target = pendingTarget !== null ? pendingTarget : idx + 1;
+          pendingTarget = null;
+          if (!(await load(target))) doClose();  // 行き先が無ければ閉じる
         },
       });
       if (multi) {
@@ -697,7 +703,13 @@ async function openEntryDialog(entryId, { onChanged, siblings } = {}) {
   async function go(delta) {
     const next = idx + delta;
     if (next < 0 || next >= list.length) return;
-    if (form.isDirty && !(await confirmDialog('保存していない変更があります。破棄して移動しますか？'))) return;
+    if (form.isDirty) {
+      // 直しかけのまま移ると修正が消えてしまうので、先に保存する。
+      // 保存できなければ (貸借不一致など) その場に留まる。
+      pendingTarget = next;
+      if (!(await form.save())) pendingTarget = null;
+      return;                       // 保存が通れば onChanged 側で移動する
+    }
     await load(next);
   }
 
@@ -774,6 +786,14 @@ routes.entry = async function (main, params) {
       const tr = e.target.closest('tr[data-id]');
       if (!tr) return;
       const id = ed ? Number(ed.dataset.edit) : Number(tr.dataset.id);
+      if (form.isDirty && id !== form.editingId) {
+        if (form.editingId) {
+          // 修正中の伝票を直しかけのまま置き去りにしない
+          if (!(await form.save())) return;
+        } else if (!(await confirmDialog('入力中の仕訳が消えます。よろしいですか？'))) {
+          return;
+        }
+      }
       try { form.loadEntry(await GET(`/api/entries/${id}`)); } catch (err) { showError(err); }
     };
   }
