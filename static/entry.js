@@ -13,7 +13,12 @@ function createEntryForm(root, opts = {}) {
   let editingId = null;      // 修正中の伝票 id
   let editingVno = null;
   let lastSaved = null;
-  let dirty = false;         // 読み込んでから手で触ったか (別の伝票へ移る前の確認に使う)
+  // 読み込んだ時点からの変更を見張る。別の伝票へ移る前に保存するかどうかの判断に使う。
+  //   typed    : 手で文字を打ったか (打ちかけで未確定の文字も拾うため)
+  //   baseline : 読み込んだ (または保存した) 時点の内容。定型仕訳の適用・行の追加や削除は
+  //              入力イベントを出さないので、内容そのものを比べて変化を見つける
+  let typed = false;
+  let baseline = '';
 
   root.innerHTML = `
   <div class="panel" id="entry-form">
@@ -65,9 +70,8 @@ function createEntryForm(root, opts = {}) {
   </div>`;
 
   const q = (sel) => $(sel, root);
-  // 画面から入力があったら「未保存の変更あり」。値を組み立てて入れる処理では発火しない。
-  root.addEventListener('input', () => { dirty = true; });
-  root.addEventListener('change', () => { dirty = true; });
+  root.addEventListener('input', () => { typed = true; });
+  root.addEventListener('change', () => { typed = true; });
   const tbody = q('#e-lines');
   const dateInput = q('#e-date');
   const memoInput = q('#e-memo');
@@ -318,6 +322,18 @@ function createEntryForm(root, opts = {}) {
       description: f('desc').value.trim(),
     };
   }
+  /** いまの入力内容を、比較できる形にまとめる。
+   *  空の行は数えない (行を足しただけで「変更あり」にしないため)。 */
+  function snapshot() {
+    const lines = [];
+    for (const tr of $$('tr', tbody)) {
+      const { empty, ...l } = lineData(tr);
+      if (!empty) lines.push(l);
+    }
+    return JSON.stringify([currentDate, memoInput.value.trim(), lines]);
+  }
+  function markSaved() { typed = false; baseline = snapshot(); }
+
   function computeTotals() {
     let dr = 0, cr = 0;
     for (const tr of $$('tr', tbody)) {
@@ -376,7 +392,7 @@ function createEntryForm(root, opts = {}) {
     addLine({});
     if (!keepDate) setDate(S.fy.start_date);
     updateTotals();
-    dirty = false;
+    markSaved();
   }
   /** 入力途中の文字を確定する。画面の表示と、保存される内容を一致させる。
    *
@@ -425,7 +441,7 @@ function createEntryForm(root, opts = {}) {
         toast(`伝票 No.${res.voucher_no} を登録しました`);
       }
       lastSaved = res;
-      dirty = false;
+      markSaved();
       if (!inDialog) {
         resetForm(true);
         dateInput.focus();
@@ -448,7 +464,7 @@ function createEntryForm(root, opts = {}) {
     q('#e-delete').style.display = '';
     updateTotals();
     focusFirstLine();
-    dirty = false;
+    markSaved();
     if (!inDialog) window.scrollTo({ top: 0 });
   }
   function copyEntry(entry) {
@@ -639,7 +655,9 @@ function createEntryForm(root, opts = {}) {
     loadEntry, copyEntry, resetForm, save, deleteEntry, setDate, focusDate: () => dateInput.focus(),
     get editingId() { return editingId; },
     get currentDate() { return currentDate; },
-    get isDirty() { return dirty; },
+    // 手で打った文字があるか、読み込んだ時点から内容が変わっていれば「未保存」。
+    // 定型仕訳の適用・行の追加や削除・候補からの選択も、内容の比較で拾える。
+    get isDirty() { return typed || snapshot() !== baseline; },
     destroy() {
       document.removeEventListener('keydown', onAnyKeyDown, true);
       document.removeEventListener('keyup', onKeyUp, true);
