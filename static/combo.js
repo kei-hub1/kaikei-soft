@@ -120,6 +120,10 @@ function makeSuggest(input, options) {
  *   options.allowEmpty : 空を許すか (既定 true)
  *   options.openOnFocus : カーソルが入ったら候補一覧を開くか (既定 false)
  *                         補助科目のように「何が選べるか」をその場で示したい欄で使う
+ *   options.emptyFallback : () => item|null
+ *                         空欄のまま Enter を押した時に、代わりに入れる項目を返す。
+ *                         仕訳入力で「前の行と同じ科目」を補うために使う。
+ *                         null を返せば従来どおり空のまま次へ進む。
  * input.dataset.id に選択 id を保持する。
  */
 function makeCombo(input, options) {
@@ -227,6 +231,10 @@ function makeCombo(input, options) {
       if (navigated && hl >= 0 && filtered[hl]) { select(filtered[hl], true); return; }
       const q = input.value.trim();
       if (!q) {
+        if (options.emptyFallback) {
+          const fb = options.emptyFallback();
+          if (fb) { select(fb, true); return; }
+        }
         if (options.allowEmpty === false && input.dataset.id) { close(); return; }
         select(null, true);
         return;

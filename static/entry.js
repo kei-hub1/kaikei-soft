@@ -55,7 +55,9 @@ function createEntryForm(root, opts = {}) {
       <kbd>Enter</kbd> 次の項目 / <kbd>Shift+Enter</kbd> 前の項目 / 科目はコード・かな・名称で検索 <kbd>↑↓</kbd> で選択 /
       金額欄で空欄のまま <kbd>Enter</kbd> → 差額を入力 / 摘要欄で <kbd>Enter</kbd> → 貸借一致なら${inDialog ? '保存' : '登録'}、不一致なら行追加 /
       補助科目がある科目は確定すると候補が開くので <kbd>↑↓</kbd> と <kbd>Enter</kbd> で選択 (不要ならそのまま <kbd>Enter</kbd>) /
-      <kbd>Shift</kbd> 単独で押して離すと行追加 (同じ伝票にまとめる) / <kbd>Ctrl+Del</kbd> 行削除 / 摘要は <kbd>F4</kbd> または入力で候補表示、コード入力 + <kbd>Enter</kbd> で展開
+      <kbd>Shift</kbd> 単独で押して離すと行追加 (同じ伝票にまとめる) /
+      2 行目以降は科目欄で空のまま <kbd>Enter</kbd> → 前の行と同じ科目 (空のまま進むときは <kbd>Tab</kbd>) /
+      <kbd>Ctrl+Del</kbd> 行削除 / 摘要は <kbd>F4</kbd> または入力で候補表示、コード入力 + <kbd>Enter</kbd> で展開
       ${inDialog ? '/ <kbd>Esc</kbd> 閉じる' : ''}
     </div>
   </div>`;
@@ -133,13 +135,18 @@ function createEntryForm(root, opts = {}) {
     // ここに移ってくるので、そのまま上下キーと Enter で補助科目を選べる。
     const drSub = makeCombo(f('drsub'), { items: () => subItems(dr.id), openOnFocus: true, onCommit: () => focusNext(f('drsub')) });
     const crSub = makeCombo(f('crsub'), { items: () => subItems(cr.id), openOnFocus: true, onCommit: () => focusNext(f('crsub')) });
+    // 空欄のまま Enter を押したら、前の行と同じ科目を入れる。
+    // 複合仕訳で片側が同じ科目 (資金諸口など) の行を続けて書くときに打ち直さずに済む。
+    // 空のままにしたいときは Enter ではなく Tab で次の欄へ移る。
     const dr = makeCombo(f('dr'), {
       items: accountItems,
+      emptyFallback: () => prevAccount(tr, 'dr'),
       onChange: (it) => { drSub.clear(); updateSubState(f('drsub'), it); applyDefaultTax(); },
       onCommit: () => focusNext(f('dr')),
     });
     const cr = makeCombo(f('cr'), {
       items: accountItems,
+      emptyFallback: () => prevAccount(tr, 'cr'),
       onChange: (it) => { crSub.clear(); updateSubState(f('crsub'), it); applyDefaultTax(); },
       onCommit: () => focusNext(f('cr')),
     });
@@ -253,6 +260,16 @@ function createEntryForm(root, opts = {}) {
     updateTotals();
     if (focus) f('dr').focus();
     return tr;
+  }
+
+  /** この行より上で、同じ欄に最後に入っている科目を返す。無ければ null。 */
+  function prevAccount(tr, field) {
+    for (let p = tr.previousElementSibling; p; p = p.previousElementSibling) {
+      const combo = p._combos && p._combos[field];
+      const id = combo && combo.id;
+      if (id && S.accountById[id]) return S.accountById[id];
+    }
+    return null;
   }
 
   function removeLine(tr) {
@@ -514,8 +531,8 @@ function createEntryForm(root, opts = {}) {
     shiftTap = 0;
     if (!started || Date.now() - started > SHIFT_TAP_MS) return;
     if (!keysActive() || e.ctrlKey || e.altKey || e.metaKey) return;
-    // 科目や摘要の候補を選んでいる最中は邪魔をしない
-    if (document.querySelector('.combo .dropdown.open')) return;
+    // 候補一覧が開いていても行を足す。摘要を打った直後は候補が開いたままで、
+    // そこが一番行を足したい場面のため。入力中の内容は欄から離れる時に確定される。
     e.preventDefault();
     addLine({}, true);
   };
