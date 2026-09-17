@@ -21,7 +21,7 @@ function createEntryForm(root, opts = {}) {
       <div class="field"><span>日付 (月日 例: 0401)</span>
         <div class="row" style="gap:6px"><input id="e-date" class="mono" style="width:120px"><span id="e-date-disp" class="muted"></span></div></div>
       <div class="field"><span>伝票No</span><input id="e-vno" class="num" style="width:70px" readonly></div>
-      <div class="field"><span>伝票メモ</span><input id="e-memo" style="width:200px"></div>
+      <div class="field"><span>伝票メモ</span><input id="e-memo" class="memo" style="width:200px"></div>
       <button id="e-template" title="定型仕訳を呼び出す">定型仕訳 <kbd>F2</kbd></button>
       ${inDialog ? '' : '<button id="e-copy" title="直前に登録した伝票を複写">前伝票複写 <kbd>F5</kbd></button>'}
       <div class="status" id="e-status"></div>
@@ -719,7 +719,7 @@ routes.entry = async function (main, params) {
           <td>${l.debit_code ? esc(l.debit_code + ' ' + l.debit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.debit_sub_name || '')}</td>
           <td>${l.credit_code ? esc(l.credit_code + ' ' + l.credit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.credit_sub_name || '')}</td>
           <td class="num">${fmt(l.amount)}</td>${exempt ? '' : `<td class="code" title="${esc(taxName(l.tax_class))}">${l.tax_class !== '00' ? esc(taxShort(l.tax_class)) : ''}</td>`}
-          <td>${esc(l.description)}${e.memo && i === 0 ? ` <span class="muted">[${esc(e.memo)}]</span>` : ''}</td>
+          <td>${esc(l.description)}${e.memo && i === 0 ? ` <span class="memo">[${esc(e.memo)}]</span>` : ''}</td>
           <td class="center" style="white-space:nowrap">${i === 0 ? `<button class="small" data-edit="${e.id}">修正</button> <button class="small danger" data-del="${e.id}" data-vno="${e.voucher_no}">削除</button>` : ''}</td>
         </tr>`);
       });

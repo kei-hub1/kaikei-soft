@@ -115,7 +115,7 @@ routes.journal = async function (main, params) {
           <td>${l.credit_code ? esc(l.credit_code + ' ' + l.credit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.credit_sub_name || '')}</td>
           <td class="num">${fmt(l.amount)}</td>
           ${exempt ? '' : `<td class="code">${l.tax_class !== '00' ? esc(taxShort(l.tax_class)) : ''}</td><td class="num">${l.tax_amount ? fmt(l.tax_amount) : ''}</td>`}
-          <td>${esc(l.description)}${e.memo && i === 0 ? ` <span class="muted">[${esc(e.memo)}]</span>` : ''}</td></tr>`);
+          <td>${esc(l.description)}${e.memo && i === 0 ? ` <span class="memo">[${esc(e.memo)}]</span>` : ''}</td></tr>`);
       });
     }
     flush();
