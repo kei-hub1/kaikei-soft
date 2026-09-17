@@ -276,6 +276,22 @@ function makeCombo(input, options) {
 
   const combo = {
     input,
+    /** 入力途中の文字を確定する。確定できなければ false を返す。
+     *  保存の直前に呼ぶ。画面に見えている文字と、実際に保存される内容を一致させるため。 */
+    commitText() {
+      const q = input.value.trim();
+      if (!q) {                                   // 空欄にした = 選択を外す
+        if (input.dataset.id) select(null, false);
+        close();
+        return true;
+      }
+      if (input.dataset.id && q === lastLabel) { close(); return true; }   // 確定済みで変化なし
+      const it = resolve();
+      close();
+      if (!it) return false;                      // 該当する項目が無い
+      select(it, false);
+      return true;
+    },
     set(id) {
       const it = id ? items().concat(options.items() || []).find(x => String(x.id) === String(id)) : null;
       input.dataset.id = it ? String(it.id) : '';

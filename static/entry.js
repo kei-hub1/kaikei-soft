@@ -378,9 +378,37 @@ function createEntryForm(root, opts = {}) {
     updateTotals();
     dirty = false;
   }
+  /** 入力途中の文字を確定する。画面の表示と、保存される内容を一致させる。
+   *
+   *  科目などの欄は「選んだ項目の id」を文字とは別に持っている。Enter を押さずに
+   *  保存や別の伝票への移動をすると、打った文字が確定されないまま前の科目で
+   *  保存されてしまうため、保存の直前にここで確定させる。
+   */
+  function commitPendingInput() {
+    const rows = $$('tr', tbody);
+    for (let i = 0; i < rows.length; i++) {
+      const tr = rows[i];
+      const c = tr._combos;
+      const targets = [['借方科目', c.dr], ['借方補助', c.drSub], ['貸方科目', c.cr], ['貸方補助', c.crSub]];
+      if (c.drDept) targets.push(['借方部門', c.drDept], ['貸方部門', c.crDept]);
+      for (const [label, combo] of targets) {
+        if (!combo || combo.commitText()) continue;
+        toast(`${i + 1} 行目: ${label}「${combo.input.value.trim()}」が見つかりません`, true);
+        combo.input.focus();
+        return false;
+      }
+      if (tr._descSuggest) tr._descSuggest.resolve();   // 摘要のコード入力を本文に展開する
+      const amt = tr.querySelector('[data-f=amount]');
+      if (amt) amt.value = amt.value.trim() ? fmt(parseAmount(amt.value)) : '';
+    }
+    updateTotals();
+    return true;
+  }
+
   /** 保存する。成功したら true、入力の不備などで保存できなければ false。 */
   async function save() {
     if (!commitDate()) return false;
+    if (!commitPendingInput()) return false;
     const lines = $$('tr', tbody).map(lineData).filter(l => !l.empty);
     if (!lines.length) { toast('仕訳行を入力してください', true); focusFirstLine(); return false; }
     const payload = { entry_date: currentDate, memo: memoInput.value.trim(), lines: lines.map(({ empty, ...l }) => l) };
