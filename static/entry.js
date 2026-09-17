@@ -45,7 +45,7 @@ function createEntryForm(root, opts = {}) {
     <div class="entry-footer">
       <div class="totals">借方 <b id="t-dr">0</b>　貸方 <b id="t-cr">0</b>　差額 <b id="t-diff" class="diff">0</b></div>
       <div class="actions">
-        <button id="e-addrow">行追加 <kbd>Ctrl+Ins</kbd></button>
+        <button id="e-addrow" title="同じ伝票に行を足します (複合仕訳)">行追加 <kbd>Shift</kbd></button>
         ${inDialog ? '' : '<button id="e-clear">クリア <kbd>Esc</kbd></button>'}
         <button id="e-delete" class="danger" style="display:none">この伝票を削除</button>
         <button id="e-save" class="primary">${inDialog ? '修正を保存' : '登録'} <kbd>Ctrl+Enter</kbd></button>
@@ -55,7 +55,7 @@ function createEntryForm(root, opts = {}) {
       <kbd>Enter</kbd> 次の項目 / <kbd>Shift+Enter</kbd> 前の項目 / 科目はコード・かな・名称で検索 <kbd>↑↓</kbd> で選択 /
       金額欄で空欄のまま <kbd>Enter</kbd> → 差額を入力 / 摘要欄で <kbd>Enter</kbd> → 貸借一致なら${inDialog ? '保存' : '登録'}、不一致なら行追加 /
       補助科目がある科目は確定すると候補が開くので <kbd>↑↓</kbd> と <kbd>Enter</kbd> で選択 (不要ならそのまま <kbd>Enter</kbd>) /
-      <kbd>Ctrl+Del</kbd> 行削除 / 摘要は <kbd>F4</kbd> または入力で候補表示、コード入力 + <kbd>Enter</kbd> で展開
+      <kbd>Shift</kbd> 単独で押して離すと行追加 (同じ伝票にまとめる) / <kbd>Ctrl+Del</kbd> 行削除 / 摘要は <kbd>F4</kbd> または入力で候補表示、コード入力 + <kbd>Enter</kbd> で展開
       ${inDialog ? '/ <kbd>Esc</kbd> 閉じる' : ''}
     </div>
   </div>`;
@@ -491,12 +491,37 @@ function createEntryForm(root, opts = {}) {
   }
 
   // ---------------------------------------------------------------- グローバルキー
-  const onKey = (e) => {
-    // 手前に出ているダイアログだけがキー操作を受ける。
-    // 画面に置いたフォームは、ダイアログが開いている間は受け取らない。
+  /** 手前に出ているダイアログだけがキー操作を受ける。
+   *  画面に置いたフォームは、ダイアログが開いている間は受け取らない。 */
+  function keysActive() {
     const modals = $$('.modal-bg');
     const top = modals.length ? modals[modals.length - 1] : null;
-    if (inDialog ? (!top || !top.contains(root)) : top) return;
+    return inDialog ? !!(top && top.contains(root)) : !top;
+  }
+
+  // Shift を単独で押して離したら行追加。他のキーと組み合わせた場合 (Shift+Enter など) は何もしない。
+  // 入力欄が Enter の伝播を止めることがあるため、押されたキーの見張りは捕捉段階 (capture) で行う。
+  let shiftTap = 0;               // Shift を押した時刻。0 なら単独押しではない
+  const SHIFT_TAP_MS = 700;       // これより長く押していたら、押しっぱなしとみなして無視する
+
+  const onAnyKeyDown = (e) => {
+    if (e.key !== 'Shift') { shiftTap = 0; return; }   // 他のキーと一緒に押したので単独押しではない
+    if (!e.repeat && !e.ctrlKey && !e.altKey && !e.metaKey && keysActive()) shiftTap = Date.now();
+  };
+  const onKeyUp = (e) => {
+    if (e.key !== 'Shift') return;
+    const started = shiftTap;
+    shiftTap = 0;
+    if (!started || Date.now() - started > SHIFT_TAP_MS) return;
+    if (!keysActive() || e.ctrlKey || e.altKey || e.metaKey) return;
+    // 科目や摘要の候補を選んでいる最中は邪魔をしない
+    if (document.querySelector('.combo .dropdown.open')) return;
+    e.preventDefault();
+    addLine({}, true);
+  };
+
+  const onKey = (e) => {
+    if (!keysActive()) return;
     if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); save(); }
     else if (e.key === 'Escape') {
       if (inDialog) return;     // ダイアログはダイアログ側が閉じる
@@ -505,7 +530,12 @@ function createEntryForm(root, opts = {}) {
     else if (e.key === 'F2') { e.preventDefault(); openTemplatePicker(); }
     else if (e.key === 'F5' && !inDialog) { e.preventDefault(); copyLast(); }
   };
+  // Shift を押しながらのマウス操作も、単独押しではない
+  const onDown = () => { shiftTap = 0; };
+  document.addEventListener('keydown', onAnyKeyDown, true);
+  document.addEventListener('keyup', onKeyUp, true);
   document.addEventListener('keydown', onKey);
+  document.addEventListener('mousedown', onDown);
 
   setDate(currentDate);
   resetForm(true);
@@ -514,7 +544,12 @@ function createEntryForm(root, opts = {}) {
     loadEntry, copyEntry, resetForm, save, deleteEntry, setDate, focusDate: () => dateInput.focus(),
     get editingId() { return editingId; },
     get currentDate() { return currentDate; },
-    destroy() { document.removeEventListener('keydown', onKey); },
+    destroy() {
+      document.removeEventListener('keydown', onAnyKeyDown, true);
+      document.removeEventListener('keyup', onKeyUp, true);
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onDown);
+    },
   };
 }
 
