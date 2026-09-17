@@ -227,8 +227,8 @@ def test_masters_and_opening_balances(client):
     assert r.status_code == 201
     assert client.delete(f"/api/accounts/{acc['617']['id']}").status_code == 409
     # 定型仕訳
-    r = client.post(f"/api/clients/{cid}/templates", json={"code": "1", "name": "家賃支払", "debit_account_id": acc["624"]["id"],
-                                                          "credit_account_id": acc["111"]["id"], "amount": 110000, "tax_class": "21"})
+    r = client.post(f"/api/clients/{cid}/templates", json={"code": "1", "name": "家賃支払", "lines": [
+        {"debit_account_id": acc["624"]["id"], "credit_account_id": acc["111"]["id"], "amount": 110000, "tax_class": "21"}]})
     assert r.status_code == 201
     assert len(client.get(f"/api/clients/{cid}/templates").json()) == 1
     # 締め
@@ -997,3 +997,62 @@ def test_csv_import_rejects_an_unknown_sub_account(client):
     r = client.post(f"/api/clients/{cl2['id']}/import/journal", params={"sub_id": a["id"]}, files=files)
     assert r.status_code == 400
     assert "補助科目" in r.json()["detail"]
+
+
+def test_templates_hold_a_whole_voucher(client):
+    """定型仕訳は複合仕訳 (伝票まるごと) を持てる。"""
+    cl, fy, acc = make_client(client)
+    cid = cl["id"]
+    body = {"code": "10", "name": "給与支払", "memo": "毎月25日", "lines": [
+        {"debit_account_id": acc["601"]["id"], "amount": 300000, "description": "給与"},
+        {"credit_account_id": acc["316"]["id"], "amount": 30000, "description": "源泉所得税"},
+        {"credit_account_id": acc["111"]["id"], "amount": 270000, "description": "振込"},
+    ]}
+    t = client.post(f"/api/clients/{cid}/templates", json=body).json()
+    assert (t["code"], t["name"], t["memo"]) == ("10", "給与支払", "毎月25日")
+    assert [(l["amount"], l["description"]) for l in t["lines"]] == [
+        (300000, "給与"), (30000, "源泉所得税"), (270000, "振込")]
+
+    # 修正でも明細が入れ替わる
+    body["lines"] = body["lines"][:2]
+    body["name"] = "給与支払 (2 行)"
+    t2 = client.put(f"/api/templates/{t['id']}", json=body).json()
+    assert len(t2["lines"]) == 2 and t2["name"] == "給与支払 (2 行)"
+
+    # 同じコードは使えない
+    r = client.post(f"/api/clients/{cid}/templates", json={"code": "10", "name": "別", "lines": []})
+    assert r.status_code == 409
+
+    # 削除すると明細も消える
+    assert client.delete(f"/api/templates/{t['id']}").status_code == 204
+    assert client.get(f"/api/clients/{cid}/templates").json() == []
+
+
+def test_template_can_be_made_from_an_existing_entry(client):
+    """登録済みの伝票を、そのまま定型仕訳にできる。"""
+    cl, fy, acc = make_client(client)
+    cid = cl["id"]
+    d = fy["start_date"]
+    e = client.post(f"/api/clients/{cid}/entries", json={"entry_date": d, "memo": "要確認", "lines": [
+        {"debit_account_id": acc["601"]["id"], "amount": 300000, "description": "8月分給与"},
+        {"credit_account_id": acc["316"]["id"], "amount": 30000, "description": "源泉所得税"},
+        {"credit_account_id": acc["111"]["id"], "amount": 270000, "description": "振込"},
+    ]}).json()
+    t = client.post(f"/api/clients/{cid}/templates/from-entry/{e['id']}",
+                    params={"name": "給与の支払"}).json()
+    assert t["name"] == "給与の支払"
+    assert t["memo"] == "要確認"                      # 伝票メモも引き継ぐ
+    assert t["code"] == "1"                            # 空いている番号が付く
+    assert [(l["debit_account_id"], l["credit_account_id"], l["amount"], l["description"]) for l in t["lines"]] == [
+        (acc["601"]["id"], None, 300000, "8月分給与"),
+        (None, acc["316"]["id"], 30000, "源泉所得税"),
+        (None, acc["111"]["id"], 270000, "振込")]
+
+    # 名前を省くと最初の摘要が名前になる。コードは次の空き番号
+    t2 = client.post(f"/api/clients/{cid}/templates/from-entry/{e['id']}").json()
+    assert (t2["code"], t2["name"]) == ("2", "8月分給与")
+
+    # 他の顧問先の伝票は取れない
+    cl2, _, _ = make_client(client, code="002")
+    r = client.post(f"/api/clients/{cl2['id']}/templates/from-entry/{e['id']}")
+    assert r.status_code == 404

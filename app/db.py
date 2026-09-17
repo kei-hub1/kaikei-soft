@@ -144,15 +144,26 @@ CREATE TABLE IF NOT EXISTS entry_templates (
   client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
   code TEXT NOT NULL,
   name TEXT NOT NULL,
-  debit_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
-  debit_sub_id INTEGER REFERENCES sub_accounts(id) ON DELETE SET NULL,
-  credit_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
-  credit_sub_id INTEGER REFERENCES sub_accounts(id) ON DELETE SET NULL,
-  amount INTEGER NOT NULL DEFAULT 0,
-  tax_class TEXT NOT NULL DEFAULT '',
-  description TEXT NOT NULL DEFAULT '',
+  memo TEXT NOT NULL DEFAULT '',        -- 呼び出したときに入れる伝票メモ
   UNIQUE(client_id, code)
 );
+
+-- 定型仕訳の明細。複合仕訳 (伝票まるごと) を定型にできるよう行で持つ。
+CREATE TABLE IF NOT EXISTS entry_template_lines (
+  id INTEGER PRIMARY KEY,
+  template_id INTEGER NOT NULL REFERENCES entry_templates(id) ON DELETE CASCADE,
+  line_no INTEGER NOT NULL,
+  debit_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  debit_sub_id INTEGER REFERENCES sub_accounts(id) ON DELETE SET NULL,
+  debit_dept_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+  credit_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  credit_sub_id INTEGER REFERENCES sub_accounts(id) ON DELETE SET NULL,
+  credit_dept_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+  amount INTEGER NOT NULL DEFAULT 0,
+  tax_class TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_template_lines ON entry_template_lines(template_id, line_no);
 """
 
 
@@ -173,12 +184,20 @@ def connect() -> sqlite3.Connection:
 # 既存の DB に後から追加した列。(テーブル名, 列名, 定義) を並べておけば起動時に補う。
 # 新しいテーブルは SCHEMA の CREATE TABLE IF NOT EXISTS で自動的に作られる。
 ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    # 定型仕訳が伝票メモも持てるようにする
+    ("entry_templates", "memo", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 # 使わなくなったテーブル・列。既存の DB から取り除く。
 # 取り込んだ仕訳そのものは通常の仕訳として残る。
 REMOVED_TABLES = ("passbook_imports", "passbooks", "settings")
-REMOVED_COLUMNS = (("journal_entries", "passbook_id"), ("journal_entries", "passbook_import_id"))
+# 定型仕訳は 1 行だけ持つ作りだったが、複合仕訳も入れられるよう明細テーブルへ移した
+REMOVED_COLUMNS = (
+    ("journal_entries", "passbook_id"), ("journal_entries", "passbook_import_id"),
+    ("entry_templates", "debit_account_id"), ("entry_templates", "debit_sub_id"),
+    ("entry_templates", "credit_account_id"), ("entry_templates", "credit_sub_id"),
+    ("entry_templates", "amount"), ("entry_templates", "tax_class"), ("entry_templates", "description"),
+)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -190,7 +209,26 @@ def _migrate(conn: sqlite3.Connection) -> None:
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    _move_template_lines(conn)
     _drop_removed(conn)
+
+
+def _move_template_lines(conn: sqlite3.Connection) -> None:
+    """1 行だけだった定型仕訳を明細テーブルへ移す。古い列を捨てる前に呼ぶ。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(entry_templates)").fetchall()}
+    if "debit_account_id" not in cols:
+        return          # 既に移してある
+    rows = conn.execute(
+        "SELECT t.* FROM entry_templates t "
+        "WHERE NOT EXISTS (SELECT 1 FROM entry_template_lines l WHERE l.template_id=t.id)").fetchall()
+    for r in rows:
+        if r["debit_account_id"] is None and r["credit_account_id"] is None and not r["amount"]:
+            continue
+        conn.execute(
+            "INSERT INTO entry_template_lines(template_id,line_no,debit_account_id,debit_sub_id,"
+            "credit_account_id,credit_sub_id,amount,tax_class,description) VALUES(?,1,?,?,?,?,?,?,?)",
+            (r["id"], r["debit_account_id"], r["debit_sub_id"], r["credit_account_id"], r["credit_sub_id"],
+             r["amount"], r["tax_class"], r["description"]))
 
 
 def _drop_removed(conn: sqlite3.Connection) -> None:

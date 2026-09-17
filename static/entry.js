@@ -23,6 +23,7 @@ function createEntryForm(root, opts = {}) {
       <div class="field"><span>伝票No</span><input id="e-vno" class="num" style="width:70px" readonly></div>
       <div class="field"><span>伝票メモ</span><input id="e-memo" class="memo" style="width:200px"></div>
       <button id="e-template" title="定型仕訳を呼び出す">定型仕訳 <kbd>F2</kbd></button>
+      <button id="e-tosave" title="いま入力されている内容を、伝票まるごと定型仕訳に登録します">定型登録 <kbd>F3</kbd></button>
       ${inDialog ? '' : '<button id="e-copy" title="直前に登録した伝票を複写">前伝票複写 <kbd>F5</kbd></button>'}
       <div class="status" id="e-status"></div>
     </div>
@@ -447,6 +448,7 @@ function createEntryForm(root, opts = {}) {
   q('#e-addrow').onclick = () => addLine({}, true);
   q('#e-delete').onclick = () => { if (editingId) deleteEntry(editingId, editingVno); };
   q('#e-template').onclick = openTemplatePicker;
+  q('#e-tosave').onclick = saveAsTemplate;
   if (q('#e-copy')) q('#e-copy').onclick = copyLast;
 
   async function copyLast() {
@@ -457,6 +459,31 @@ function createEntryForm(root, opts = {}) {
     }
     if (!src) { toast('複写できる伝票がありません', true); return; }
     copyEntry(src);
+  }
+
+  // ---------------------------------------------------------------- 定型登録
+  /** いま入力されている伝票を、そのまま定型仕訳として登録する。 */
+  function saveAsTemplate() {
+    const lines = $$('tr', tbody).map(lineData).filter(l => !l.empty);
+    if (!lines.length) { toast('先に仕訳を入力してください', true); focusFirstLine(); return; }
+    const used = new Set(S.templates.map(t => t.code));
+    let n = 1;
+    while (used.has(String(n))) n++;
+    const suggested = lines.find(l => l.description) ? lines.find(l => l.description).description : '';
+    formModal('定型仕訳に登録',
+      field('コード', textInput('code', String(n), 'required maxlength="10"')) +
+      field('名称', textInput('name', suggested, 'required')) +
+      `<div class="field wide"><span>登録する内容</span><div class="muted">${lines.length} 行 / 借方合計 ${
+        fmt(lines.filter(l => l.debit_account_id).reduce((a, l) => a + l.amount, 0))} 円${
+        memoInput.value.trim() ? ` / 伝票メモ「${esc(memoInput.value.trim())}」` : ''}</div></div>`,
+      async (d) => {
+        await POST(`/api/clients/${S.client.id}/templates`, {
+          code: d.code.trim(), name: d.name.trim(), memo: memoInput.value.trim(),
+          lines: lines.map(({ empty, tax_amount, ...l }) => l),
+        });
+        await loadTemplates();
+        toast(`定型仕訳「${d.name.trim()}」に登録しました`);
+      }, { submitLabel: '登録' });
   }
 
   // ---------------------------------------------------------------- 定型仕訳
@@ -474,13 +501,20 @@ function createEntryForm(root, opts = {}) {
         const qi = $('#tp-q', bg), body = $('#tp-body', bg);
         let hl = 0;
         const draw = () => {
+          const sum = (t, k) => (t.lines || []).reduce((n, l) => n + (l[k] || 0), 0);
+          const label = (t, side) => {
+            const names = [...new Set((t.lines || []).map(l => acctLabel(l[side + '_account_id'])).filter(Boolean))];
+            return names.length > 1 ? names[0] + ` 他${names.length - 1}` : (names[0] || '');
+          };
           body.innerHTML = items.map((t, i) => `<tr data-i="${i}" class="clickable ${i === hl ? 'hl' : ''}">
-            <td class="code">${esc(t.code)}</td><td>${esc(t.name)}</td><td>${esc(acctLabel(t.debit_account_id))}${t.debit_sub_id ? ' / ' + esc(subLabel(t.debit_sub_id)) : ''}</td>
-            <td>${esc(acctLabel(t.credit_account_id))}${t.credit_sub_id ? ' / ' + esc(subLabel(t.credit_sub_id)) : ''}</td>
-            <td class="num">${t.amount ? fmt(t.amount) : ''}</td><td>${esc(t.description)}</td></tr>`).join('');
+            <td class="code">${esc(t.code)}</td><td>${esc(t.name)}${(t.lines || []).length > 1 ? ` <span class="badge">${t.lines.length} 行</span>` : ''}</td>
+            <td>${esc(label(t, 'debit'))}</td><td>${esc(label(t, 'credit'))}</td>
+            <td class="num">${sum(t, 'amount') ? fmt(sum(t, 'amount')) : ''}</td>
+            <td>${esc(((t.lines || []).find(l => l.description) || {}).description || '')}</td></tr>`).join('');
         };
         const apply = (t) => {
           close();
+          // 空の行があれば、そこから置き換える (呼び出し先の行を無駄に残さない)
           let tr = curTr && tbody.contains(curTr) && lineData(curTr).empty ? curTr : null;
           if (!tr) {
             const rows = $$('tr', tbody);
@@ -488,14 +522,20 @@ function createEntryForm(root, opts = {}) {
             tr = last && lineData(last).empty ? last : null;
           }
           if (tr) tr.remove();
-          const ntr = addLine({
-            debit_account_id: t.debit_account_id, debit_sub_id: t.debit_sub_id,
-            credit_account_id: t.credit_account_id, credit_sub_id: t.credit_sub_id,
-            amount: t.amount || 0, tax_class: t.tax_class || undefined, description: t.description,
-          });
-          if (!t.tax_class) ntr._state.taxTouched = false;
+          if (t.memo && !memoInput.value.trim()) memoInput.value = t.memo;
+          let first = null;
+          for (const l of (t.lines && t.lines.length ? t.lines : [{}])) {
+            const ntr = addLine({
+              debit_account_id: l.debit_account_id, debit_sub_id: l.debit_sub_id, debit_dept_id: l.debit_dept_id,
+              credit_account_id: l.credit_account_id, credit_sub_id: l.credit_sub_id, credit_dept_id: l.credit_dept_id,
+              amount: l.amount || 0, tax_class: l.tax_class || undefined, description: l.description,
+            });
+            if (!l.tax_class) ntr._state.taxTouched = false;
+            if (!first) first = ntr;
+          }
           renumber();
-          ntr.querySelector('[data-f=amount]').focus();
+          updateTotals();
+          if (first) first.querySelector('[data-f=amount]').focus();
         };
         qi.oninput = () => {
           const s = qi.value.trim().toLowerCase();
@@ -552,6 +592,7 @@ function createEntryForm(root, opts = {}) {
       if (!document.querySelector('.combo .dropdown.open')) { e.preventDefault(); resetForm(true); dateInput.focus(); }
     } else if (e.key === 'Insert' && e.ctrlKey) { e.preventDefault(); addLine({}, true); }
     else if (e.key === 'F2') { e.preventDefault(); openTemplatePicker(); }
+    else if (e.key === 'F3') { e.preventDefault(); saveAsTemplate(); }
     else if (e.key === 'F5' && !inDialog) { e.preventDefault(); copyLast(); }
   };
   // Shift を押しながらのマウス操作も、単独押しではない

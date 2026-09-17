@@ -572,22 +572,60 @@ def descriptions_from_history(client_id: int, min_count: int = 2, limit: int = 2
 # 定型仕訳
 # ---------------------------------------------------------------------------
 
-class TemplateIn(BaseModel):
-    code: str = Field(min_length=1, max_length=10)
-    name: str = Field(min_length=1)
+class TemplateLineIn(BaseModel):
     debit_account_id: int | None = None
     debit_sub_id: int | None = None
+    debit_dept_id: int | None = None
     credit_account_id: int | None = None
     credit_sub_id: int | None = None
+    credit_dept_id: int | None = None
     amount: int = 0
     tax_class: str = ""
     description: str = ""
 
 
+class TemplateIn(BaseModel):
+    code: str = Field(min_length=1, max_length=10)
+    name: str = Field(min_length=1)
+    memo: str = ""
+    lines: list[TemplateLineIn] = []
+
+
+def _template_rows(conn, client_id: int | None = None, tid: int | None = None) -> list[dict]:
+    """定型仕訳を明細つきで返す。"""
+    if tid is not None:
+        heads = conn.execute("SELECT * FROM entry_templates WHERE id=?", (tid,)).fetchall()
+    else:
+        heads = conn.execute(
+            "SELECT * FROM entry_templates WHERE client_id=? ORDER BY code", (client_id,)).fetchall()
+    out = [dict(h) for h in heads]
+    if not out:
+        return out
+    by_id = {t["id"]: t for t in out}
+    for t in out:
+        t["lines"] = []
+    marks = ",".join("?" * len(by_id))
+    for r in conn.execute(
+            f"SELECT * FROM entry_template_lines WHERE template_id IN ({marks}) ORDER BY template_id, line_no",
+            tuple(by_id)).fetchall():
+        by_id[r["template_id"]]["lines"].append(dict(r))
+    return out
+
+
+def _save_template_lines(conn, tid: int, lines: list[TemplateLineIn]) -> None:
+    conn.execute("DELETE FROM entry_template_lines WHERE template_id=?", (tid,))
+    conn.executemany(
+        "INSERT INTO entry_template_lines(template_id,line_no,debit_account_id,debit_sub_id,debit_dept_id,"
+        "credit_account_id,credit_sub_id,credit_dept_id,amount,tax_class,description) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        [(tid, i, l.debit_account_id, l.debit_sub_id, l.debit_dept_id,
+          l.credit_account_id, l.credit_sub_id, l.credit_dept_id, l.amount, l.tax_class, l.description.strip())
+         for i, l in enumerate(lines, 1)])
+
+
 @router.get("/clients/{client_id}/templates")
 def list_templates(client_id: int):
     with db() as conn:
-        return rows_to_dicts(conn.execute("SELECT * FROM entry_templates WHERE client_id=? ORDER BY code", (client_id,)).fetchall())
+        return _template_rows(conn, client_id=client_id)
 
 
 @router.post("/clients/{client_id}/templates", status_code=201)
@@ -595,12 +633,10 @@ def create_template(client_id: int, t: TemplateIn):
     with db() as conn:
         if conn.execute("SELECT 1 FROM entry_templates WHERE client_id=? AND code=?", (client_id, t.code)).fetchone():
             raise HTTPException(409, "同じコードの定型仕訳が既に存在します")
-        cur = conn.execute(
-            "INSERT INTO entry_templates(client_id,code,name,debit_account_id,debit_sub_id,credit_account_id,credit_sub_id,amount,tax_class,description) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (client_id, t.code, t.name, t.debit_account_id, t.debit_sub_id, t.credit_account_id, t.credit_sub_id,
-             t.amount, t.tax_class, t.description))
-        return dict(conn.execute("SELECT * FROM entry_templates WHERE id=?", (cur.lastrowid,)).fetchone())
+        cur = conn.execute("INSERT INTO entry_templates(client_id,code,name,memo) VALUES(?,?,?,?)",
+                           (client_id, t.code, t.name, t.memo))
+        _save_template_lines(conn, cur.lastrowid, t.lines)
+        return _template_rows(conn, tid=cur.lastrowid)[0]
 
 
 @router.put("/templates/{tid}")
@@ -609,11 +645,46 @@ def update_template(tid: int, t: TemplateIn):
         row = conn.execute("SELECT * FROM entry_templates WHERE id=?", (tid,)).fetchone()
         if not row:
             raise HTTPException(404, "定型仕訳が見つかりません")
-        conn.execute(
-            "UPDATE entry_templates SET code=?,name=?,debit_account_id=?,debit_sub_id=?,credit_account_id=?,credit_sub_id=?,amount=?,tax_class=?,description=? WHERE id=?",
-            (t.code, t.name, t.debit_account_id, t.debit_sub_id, t.credit_account_id, t.credit_sub_id, t.amount,
-             t.tax_class, t.description, tid))
-        return dict(conn.execute("SELECT * FROM entry_templates WHERE id=?", (tid,)).fetchone())
+        dup = conn.execute("SELECT 1 FROM entry_templates WHERE client_id=? AND code=? AND id<>?",
+                           (row["client_id"], t.code, tid)).fetchone()
+        if dup:
+            raise HTTPException(409, "同じコードの定型仕訳が既に存在します")
+        conn.execute("UPDATE entry_templates SET code=?,name=?,memo=? WHERE id=?", (t.code, t.name, t.memo, tid))
+        _save_template_lines(conn, tid, t.lines)
+        return _template_rows(conn, tid=tid)[0]
+
+
+@router.post("/clients/{client_id}/templates/from-entry/{entry_id}", status_code=201)
+def create_template_from_entry(client_id: int, entry_id: int, code: str = "", name: str = ""):
+    """登録済みの伝票を、そのまま定型仕訳にする。"""
+    with db() as conn:
+        e = conn.execute("SELECT * FROM journal_entries WHERE id=? AND client_id=?", (entry_id, client_id)).fetchone()
+        if not e:
+            raise HTTPException(404, "仕訳が見つかりません")
+        lines = conn.execute("SELECT * FROM journal_lines WHERE entry_id=? ORDER BY line_no", (entry_id,)).fetchall()
+        code = code.strip() or _next_template_code(conn, client_id)
+        if conn.execute("SELECT 1 FROM entry_templates WHERE client_id=? AND code=?", (client_id, code)).fetchone():
+            raise HTTPException(409, "同じコードの定型仕訳が既に存在します")
+        if not name.strip():
+            first = next((l["description"] for l in lines if l["description"]), "")
+            name = first or f'{e["entry_date"]} の仕訳'
+        cur = conn.execute("INSERT INTO entry_templates(client_id,code,name,memo) VALUES(?,?,?,?)",
+                           (client_id, code, name.strip(), e["memo"]))
+        _save_template_lines(conn, cur.lastrowid, [TemplateLineIn(
+            debit_account_id=l["debit_account_id"], debit_sub_id=l["debit_sub_id"], debit_dept_id=l["debit_dept_id"],
+            credit_account_id=l["credit_account_id"], credit_sub_id=l["credit_sub_id"], credit_dept_id=l["credit_dept_id"],
+            amount=l["amount"], tax_class=l["tax_class"], description=l["description"]) for l in lines])
+        return _template_rows(conn, tid=cur.lastrowid)[0]
+
+
+def _next_template_code(conn, client_id: int) -> str:
+    """空いている一番小さい番号をコードにする。"""
+    used = {r["code"] for r in conn.execute(
+        "SELECT code FROM entry_templates WHERE client_id=?", (client_id,)).fetchall()}
+    n = 1
+    while str(n) in used:
+        n += 1
+    return str(n)
 
 
 @router.delete("/templates/{tid}", status_code=204)

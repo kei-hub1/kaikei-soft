@@ -678,44 +678,142 @@ routes.departments = async function (main) {
 
 // ---------------------------------------------------------------- 定型仕訳
 routes.templates = async function (main) {
+  main.className = 'wide';
   main.innerHTML = `<h2>定型仕訳</h2>
-  <div class="toolbar"><button id="p-new" class="primary">定型仕訳を追加</button><span class="muted">仕訳入力画面で <kbd>F2</kbd> を押すと呼び出せます。</span></div>
-  <div class="panel"><table class="grid compact" id="p-table"><thead><tr><th>コード</th><th>名称</th><th>借方</th><th>貸方</th><th>金額</th><th>税区分</th><th>摘要</th><th></th></tr></thead><tbody></tbody></table></div>`;
-  function form(t) {
+  <div class="toolbar"><button id="p-new" class="primary">定型仕訳を追加</button>
+    <span class="muted">仕訳入力画面で <kbd>F2</kbd> を押すと呼び出せます。入力済みの伝票は、仕訳入力画面の「定型登録」からそのまま追加できます。</span></div>
+  <div class="panel"><div class="scroll-x"><table class="grid compact" id="p-table"><thead><tr>
+    <th style="width:70px">コード</th><th style="width:180px">名称</th><th>借方</th><th>貸方</th>
+    <th style="width:100px">金額</th><th style="width:110px">税区分</th><th>摘要</th><th style="width:130px"></th>
+  </tr></thead><tbody></tbody></table></div></div>`;
+
+  /** 定型仕訳の編集ダイアログ。連続登録に対応する。 */
+  function form(t, { keepOpen = false } = {}) {
     const isNew = !t;
-    t = t || { code: String(S.templates.length + 1), name: '', amount: 0, tax_class: '', description: '' };
-    const { bg } = formModal(isNew ? '定型仕訳の追加' : '定型仕訳の修正',
-      field('コード', textInput('code', t.code, 'required maxlength="10"')) + field('名称', textInput('name', t.name, 'required')) +
-      field('借方科目', '<input type="text" id="p-dr" placeholder="コード・かな・名称">') + field('借方補助', '<select id="p-drsub"><option value="">(なし)</option></select>') +
-      field('貸方科目', '<input type="text" id="p-cr" placeholder="コード・かな・名称">') + field('貸方補助', '<select id="p-crsub"><option value="">(なし)</option></select>') +
-      field('金額 (0 = 都度入力)', `<input type="text" name="amount" class="num" value="${t.amount || ''}">`) +
-      field('消費税区分', selectInput('tax_class', [{ value: '', label: '(科目の既定に従う)' }].concat(S.meta.tax_classes.map(x => ({ value: x.code, label: `${x.code} ${x.name}` }))), t.tax_class)) +
-      field('摘要', textInput('description', t.description), true),
-      async (d) => {
-        const body = {
-          code: d.code.trim(), name: d.name.trim(), amount: parseAmount(d.amount), tax_class: d.tax_class, description: d.description.trim(),
-          debit_account_id: dr.id, debit_sub_id: Number($('#p-drsub', bg).value) || null,
-          credit_account_id: cr.id, credit_sub_id: Number($('#p-crsub', bg).value) || null,
+    t = t || { code: nextCode(), name: '', memo: '', lines: [] };
+    const lines = (t.lines || []).map(l => ({ ...l }));
+    if (!lines.length) lines.push({});
+
+    const { bg, close } = modal(`<div style="width:min(1100px, 92vw)">
+      <h3 style="margin-top:0">${isNew ? '定型仕訳の追加' : '定型仕訳の修正'}</h3>
+      <div class="row" style="gap:12px;margin-bottom:8px">
+        <label class="field"><span>コード</span><input id="p-code" style="width:90px" maxlength="10" value="${esc(t.code)}"></label>
+        <label class="field" style="flex:1"><span>名称</span><input id="p-name" value="${esc(t.name)}"></label>
+        <label class="field" style="flex:1"><span>伝票メモ</span><input id="p-memo" class="memo" value="${esc(t.memo || '')}"></label>
+      </div>
+      <table class="entry-grid" id="p-lines"><thead><tr>
+        <th style="width:26px">#</th><th class="dr">借方科目</th><th class="dr" style="width:12%">借方補助</th>
+        <th class="cr">貸方科目</th><th class="cr" style="width:12%">貸方補助</th>
+        <th style="width:12%">金額</th><th style="width:11%">税区分</th><th style="width:20%">摘要</th><th style="width:30px"></th>
+      </tr></thead><tbody></tbody></table>
+      <div class="row" style="margin-top:6px"><button id="p-addrow">行追加</button>
+        <span class="muted">金額 0 (空欄) は、呼び出したときに都度入力します。</span></div>
+      <div class="actions">
+        <label style="margin-right:auto"><input type="checkbox" id="p-keep" ${keepOpen ? 'checked' : ''}> 続けて登録する</label>
+        <button data-close>閉じる</button><button id="p-save" class="primary">保存</button>
+      </div>
+      <div style="height:260px"></div>
+    </div>`);
+
+    // 組み立てはダイアログを開いた後で行う (下の関数や body を使うため)
+    const body = $('#p-lines tbody', bg);
+    function addRow(l = {}, focus = false) {
+      const tr = el(`<tr>
+        <td class="rowno"></td>
+        <td><input data-f="dr" placeholder="コード・かな・名称"></td><td><input data-f="drsub" placeholder="補助"></td>
+        <td><input data-f="cr" placeholder="コード・かな・名称"></td><td><input data-f="crsub" placeholder="補助"></td>
+        <td><input data-f="amount" class="num" inputmode="numeric"></td>
+        <td><select data-f="tax"><option value="">(科目の既定)</option>${S.meta.tax_classes.map(x => `<option value="${x.code}">${x.code} ${esc(x.short)}</option>`).join('')}</select></td>
+        <td><input data-f="desc"></td>
+        <td class="act"><button class="small" tabindex="-1" data-f="del" title="行削除">×</button></td></tr>`);
+      body.appendChild(tr);
+      const f = (n) => tr.querySelector(`[data-f=${n}]`);
+      const subItems = (id) => (S.subsByAccount[id] || []).filter(x => x.active);
+      const drSub = makeCombo(f('drsub'), { items: () => subItems(dr.id), openOnFocus: true });
+      const crSub = makeCombo(f('crsub'), { items: () => subItems(cr.id), openOnFocus: true });
+      const dr = makeCombo(f('dr'), { items: () => S.accounts.filter(a => a.active), onChange: (it) => { drSub.clear(); f('drsub').disabled = !(it && subItems(it.id).length); } });
+      const cr = makeCombo(f('cr'), { items: () => S.accounts.filter(a => a.active), onChange: (it) => { crSub.clear(); f('crsub').disabled = !(it && subItems(it.id).length); } });
+      tr._combos = { dr, drSub, cr, crSub };
+      f('drsub').disabled = !(l.debit_account_id && subItems(l.debit_account_id).length);
+      f('crsub').disabled = !(l.credit_account_id && subItems(l.credit_account_id).length);
+      if (l.debit_account_id) dr.set(l.debit_account_id);
+      if (l.debit_sub_id) drSub.set(l.debit_sub_id);
+      if (l.credit_account_id) cr.set(l.credit_account_id);
+      if (l.credit_sub_id) crSub.set(l.credit_sub_id);
+      if (l.amount) f('amount').value = fmt(l.amount);
+      f('tax').value = l.tax_class || '';
+      f('desc').value = l.description || '';
+      f('del').onclick = () => { if (body.children.length > 1) { tr.remove(); renumber(); } };
+      renumber();
+      if (focus) f('dr').focus();
+    }
+    function renumber() { $$('tr', body).forEach((tr, i) => { tr.querySelector('.rowno').textContent = i + 1; }); }
+
+    function collect() {
+      return $$('tr', body).map(tr => {
+        const f = (n) => tr.querySelector(`[data-f=${n}]`);
+        const c = tr._combos;
+        return {
+          debit_account_id: c.dr.id, debit_sub_id: c.drSub.id,
+          credit_account_id: c.cr.id, credit_sub_id: c.crSub.id,
+          amount: parseAmount(f('amount').value), tax_class: f('tax').value, description: f('desc').value.trim(),
         };
-        if (isNew) await POST(`/api/clients/${S.client.id}/templates`, body); else await PUT(`/api/templates/${t.id}`, body);
-        await loadTemplates(); draw(); toast('保存しました');
-      });
-    const fillSub = (sel, accountId, val) => {
-      sel.innerHTML = '<option value="">(なし)</option>' + (S.subsByAccount[accountId] || []).map(s => `<option value="${s.id}" ${s.id === val ? 'selected' : ''}>${esc(s.code)} ${esc(s.name)}</option>`).join('');
-    };
-    const dr = makeCombo($('#p-dr', bg), { items: () => S.accounts.filter(a => a.active), onChange: (it) => fillSub($('#p-drsub', bg), it && it.id), onCommit: () => $('#p-drsub', bg).focus() });
-    const cr = makeCombo($('#p-cr', bg), { items: () => S.accounts.filter(a => a.active), onChange: (it) => fillSub($('#p-crsub', bg), it && it.id), onCommit: () => $('#p-crsub', bg).focus() });
-    if (t.debit_account_id) { dr.set(t.debit_account_id); fillSub($('#p-drsub', bg), t.debit_account_id, t.debit_sub_id); }
-    if (t.credit_account_id) { cr.set(t.credit_account_id); fillSub($('#p-crsub', bg), t.credit_account_id, t.credit_sub_id); }
+      }).filter(l => l.debit_account_id || l.credit_account_id || l.amount || l.description);
+    }
+
+    lines.forEach(l => addRow(l));
+    $('#p-addrow', bg).onclick = () => addRow({}, true);
+    $('#p-save', bg).onclick = save;
+    bg.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); save(); }
+    });
+    $('#p-code', bg).focus();
+
+    async function save() {
+      const code = $('#p-code', bg).value.trim();
+      const name = $('#p-name', bg).value.trim();
+      if (!code || !name) { toast('コードと名称を入力してください', true); $('#p-code', bg).focus(); return; }
+      const body_ = { code, name, memo: $('#p-memo', bg).value.trim(), lines: collect() };
+      if (!body_.lines.length) { toast('仕訳の行を入力してください', true); return; }
+      try {
+        if (isNew) await POST(`/api/clients/${S.client.id}/templates`, body_);
+        else await PUT(`/api/templates/${t.id}`, body_);
+        await loadTemplates(); draw();
+        toast(`「${name}」を保存しました`);
+        const again = $('#p-keep', bg).checked;
+        close();
+        if (again && isNew) form(null, { keepOpen: true });   // 続けて次を登録する
+      } catch (err) { showError(err); }
+    }
   }
+
+  function nextCode() {
+    const used = new Set(S.templates.map(t => t.code));
+    let n = 1;
+    while (used.has(String(n))) n++;
+    return String(n);
+  }
+
   function draw() {
-    $('#p-table tbody').innerHTML = S.templates.map(t => `<tr><td class="code">${esc(t.code)}</td><td>${esc(t.name)}</td>
-      <td>${esc(acctLabel(t.debit_account_id))}${t.debit_sub_id ? ' / ' + esc(subLabel(t.debit_sub_id)) : ''}</td>
-      <td>${esc(acctLabel(t.credit_account_id))}${t.credit_sub_id ? ' / ' + esc(subLabel(t.credit_sub_id)) : ''}</td>
-      <td class="num">${t.amount ? fmt(t.amount) : ''}</td><td>${t.tax_class ? esc(taxName(t.tax_class)) : '<span class="muted">既定</span>'}</td><td>${esc(t.description)}</td>
-      <td style="white-space:nowrap"><button class="small" data-edit="${t.id}">修正</button> <button class="small danger" data-del="${t.id}">削除</button></td></tr>`).join('')
-      || '<tr><td colspan="8" class="empty">定型仕訳はありません</td></tr>';
+    const out = [];
+    for (const t of S.templates) {
+      const lines = t.lines && t.lines.length ? t.lines : [{}];
+      lines.forEach((l, i) => {
+        out.push(`<tr>
+          <td class="code">${i === 0 ? esc(t.code) : ''}</td>
+          <td>${i === 0 ? esc(t.name) + (t.memo ? ` <span class="memo">[${esc(t.memo)}]</span>` : '') : ''}</td>
+          <td>${esc(acctLabel(l.debit_account_id))}${l.debit_sub_id ? ' / ' + esc(subLabel(l.debit_sub_id)) : ''}</td>
+          <td>${esc(acctLabel(l.credit_account_id))}${l.credit_sub_id ? ' / ' + esc(subLabel(l.credit_sub_id)) : ''}</td>
+          <td class="num">${l.amount ? fmt(l.amount) : '<span class="muted">都度</span>'}</td>
+          <td>${l.tax_class ? esc(taxName(l.tax_class)) : '<span class="muted">既定</span>'}</td>
+          <td>${esc(l.description || '')}</td>
+          <td style="white-space:nowrap">${i === 0 ? `<button class="small" data-edit="${t.id}">修正</button> <button class="small danger" data-del="${t.id}">削除</button>` : ''}</td>
+        </tr>`);
+      });
+    }
+    $('#p-table tbody').innerHTML = out.join('') || '<tr><td colspan="8" class="empty">定型仕訳はありません</td></tr>';
   }
+
   $('#p-table').onclick = async (e) => {
     const b = e.target.closest('button'); if (!b) return;
     try {
