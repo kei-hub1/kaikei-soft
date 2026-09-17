@@ -1,0 +1,13 @@
+# 実行時に生成されるもの（利用者のデータ・ログ・出力）
+data/
+logs/
+出力/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# テストの一時ファイル
+.pytest_cache/
