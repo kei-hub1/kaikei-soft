@@ -130,7 +130,7 @@ def _to_int(s: str, default: int | None = 0) -> int | None:
 
 @router.post("/clients/{client_id}/import/journal")
 async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = False,
-                             sub_id: int | None = None):
+                             sub_id: int | None = None, ignore_suspense: bool = False):
     """仕訳 CSV を取り込む。
 
     sub_id を渡すと、その補助科目が属する科目の行で補助科目が空のものに、
@@ -154,12 +154,18 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
         accts = conn.execute("SELECT id, code, name FROM accounts WHERE client_id=?", (client_id,)).fetchall()
         by_code = {a["code"]: a["id"] for a in accts}
         by_name = {a["name"]: a["id"] for a in accts}
+        by_id = {a["id"]: f'{a["code"]} {a["name"]}' for a in accts}
         subs = conn.execute(
             "SELECT s.id, s.account_id, s.code, s.name FROM sub_accounts s JOIN accounts a ON a.id=s.account_id WHERE a.client_id=?",
             (client_id,)).fetchall()
         sub_by = {(s["account_id"], s["code"]): s["id"] for s in subs}
         sub_by_name = {(s["account_id"], s["name"]): s["id"] for s in subs}
         depts = {d["code"]: d["id"] for d in conn.execute("SELECT id, code FROM departments WHERE client_id=?", (client_id,)).fetchall()}
+        # 資金諸口 (役割が「諸口」の科目、または名称が資金諸口・諸口の科目)。
+        # コードや名称を変えても追えるよう、役割を第一の手掛かりにする。
+        suspense = {a["id"]: f'{a["code"]} {a["name"]}' for a in conn.execute(
+            "SELECT id, code, name FROM accounts WHERE client_id=? AND (role='suspense' OR name IN ('資金諸口','諸口'))",
+            (client_id,)).fetchall()}
         fixed_sub = None
         if sub_id:
             fixed_sub = conn.execute(
@@ -190,6 +196,7 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
     groups: dict[tuple, EntryIn] = {}
     order: list[tuple] = []
     applied_by_key: dict[tuple, int] = {}   # 補助科目を補った行数 (伝票ごと)
+    records: list[dict] = []                # 資金諸口のチェックに使う行の控え
     for rowno, row in enumerate(reader, 2):
         if not any(c.strip() for c in row):
             continue
@@ -226,6 +233,12 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
             groups[key] = EntryIn(entry_date=d, memo=col(row, "伝票メモ"), voucher_no=None, lines=[])
             order.append(key)
         groups[key].lines.append(line)
+        records.append({
+            "rowno": rowno, "key": key, "vno": vno, "date": d,
+            "debit": _acct_label(dr, by_id), "credit": _acct_label(cr, by_id),
+            "debit_id": dr, "credit_id": cr,
+            "amount": line.amount, "description": line.description,
+        })
 
     entries = [groups[k] for k in order]
     from .journals import _validate_entry
@@ -249,6 +262,8 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
             fresh.append(e)
             sub_applied += applied_by_key.get(key, 0)
 
+    suspense_report = check_suspense_balance(records, suspense)
+
     result = {
         "count": len(fresh), "lines": sum(len(e.lines) for e in fresh),
         "skipped": len(skipped), "dry_run": dry_run,
@@ -256,12 +271,113 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
         "sub_applied": sub_applied,
         "sub_label": (f'{fixed_sub["acode"]} {fixed_sub["aname"]} / {fixed_sub["name"]}'
                       if fixed_sub is not None else ""),
+        "suspense": suspense_report,
+        "blocked": False,
     }
+    # 資金諸口が合っていないファイルは、そのまま取り込ませない。
+    # 「不一致でも取り込む」を選んだ場合だけ通す。
+    if not suspense_report["ok"] and not ignore_suspense:
+        result["blocked"] = True
+        result["count"] = 0
+        result["lines"] = 0
+        return result
     if dry_run:
         return result
     created = create_entries_bulk(client_id, fresh)
     result["count"] = created["count"]
     return result
+
+
+def _acct_label(aid: int | None, by_id: dict) -> str:
+    return by_id.get(aid, "") if aid else ""
+
+
+def check_suspense_balance(records: list[dict], suspense: dict[int, str]) -> dict:
+    """資金諸口の貸借一致をみる。
+
+    伝票番号ごとに、借方が資金諸口の行の合計と貸方が資金諸口の行の合計を突き合わせ、
+    さらにファイル全体でも同じ集計をする。合わない伝票には原因の手掛かりを付ける。
+    """
+    report = {
+        "checked": bool(suspense),
+        "accounts": sorted(suspense.values()),
+        "ok": True,
+        "debit": 0, "credit": 0, "diff": 0,
+        "voucher_errors": [], "error_count": 0, "hints": [],
+    }
+    if not suspense or not records:
+        return report
+
+    # 伝票ごとの集計 (取り込みと同じ区切り = 日付 + 伝票番号)
+    per: dict[tuple, dict] = {}
+    for r in records:
+        g = per.setdefault(r["key"], {
+            "vno": r["vno"], "date": r["date"], "debit": 0, "credit": 0, "rows": []})
+        g["rows"].append(r)
+        if r["debit_id"] in suspense:
+            g["debit"] += r["amount"]
+        if r["credit_id"] in suspense:
+            g["credit"] += r["amount"]
+
+    report["debit"] = sum(g["debit"] for g in per.values())
+    report["credit"] = sum(g["credit"] for g in per.values())
+    report["diff"] = report["debit"] - report["credit"]
+
+    bad = [dict(g, diff=g["debit"] - g["credit"]) for g in per.values() if g["debit"] != g["credit"]]
+    report["error_count"] = len(bad)
+    report["ok"] = not bad and report["diff"] == 0
+
+    if report["diff"] != 0:
+        report["hints"].append(
+            f'ファイル全体で {abs(report["diff"]):,} 円ずれています。'
+            f'{"借方" if report["diff"] > 0 else "貸方"}の資金諸口が多い状態です。')
+    elif bad:
+        report["hints"].append(
+            "ファイル全体では合っているので、行がどの伝票番号に属するかの問題です。"
+            "下の伝票どうしで、金額の振り分けや伝票番号の付け間違いを確認してください。")
+
+    for g in sorted(bad, key=lambda x: (x["date"], str(x["vno"]))):
+        g["hints"] = _suspense_hints(g, bad, suspense)
+        g["rows"] = [{
+            "rowno": r["rowno"], "debit": r["debit"], "credit": r["credit"],
+            "amount": r["amount"], "description": r["description"],
+            "suspense_side": ("借方" if r["debit_id"] in suspense else
+                              "貸方" if r["credit_id"] in suspense else ""),
+        } for r in g["rows"]]
+        report["voucher_errors"].append(g)
+    report["voucher_errors"] = report["voucher_errors"][:50]
+    return report
+
+
+def _suspense_hints(g: dict, bad: list[dict], suspense: dict[int, str]) -> list[str]:
+    """合わない伝票について、考えられる原因を挙げる。"""
+    hints = []
+    diff = g["diff"]
+    if g["debit"] and not g["credit"]:
+        hints.append("資金諸口の行が借方にしかありません。相手側の行が抜けている可能性があります。")
+    elif g["credit"] and not g["debit"]:
+        hints.append("資金諸口の行が貸方にしかありません。相手側の行が抜けている可能性があります。")
+
+    # 差額と同じ金額で、資金諸口を使っていない行があれば、その行が怪しい
+    same = [r for r in g["rows"]
+            if r["amount"] == abs(diff) and r["debit_id"] not in suspense and r["credit_id"] not in suspense]
+    for r in same[:3]:
+        hints.append(f'{r["rowno"]} 行目 ({r["amount"]:,} 円 {r["description"]}) が資金諸口を使っていません。'
+                     "差額と同じ金額です。")
+
+    # 打ち消し合う伝票があれば、伝票番号の取り違えが考えられる
+    for other in bad:
+        if other is g or other["diff"] != -diff:
+            continue
+        hints.append(f'伝票番号 {other["vno"] or "(空欄)"} ({other["date"]}) が反対に '
+                     f'{abs(other["diff"]):,} 円ずれています。'
+                     "どちらかの行の伝票番号が違う可能性があります。")
+        break
+
+    if not g["vno"]:
+        hints.append("この行には伝票番号がありません。1 行で 1 伝票として扱われるため、"
+                     "同じ取引の行には同じ伝票番号を付けてください。")
+    return hints
 
 
 def _fingerprint(entry_date: str, memo: str, lines: list[dict]) -> tuple:
