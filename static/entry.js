@@ -68,7 +68,7 @@ function createEntryForm(root, opts = {}) {
       <kbd>Shift</kbd> 単独で押して離すと行追加 (同じ伝票にまとめる) /
       2 行目以降は科目欄で空のまま <kbd>Enter</kbd> → 前の行と同じ科目 (空のまま進むときは <kbd>Tab</kbd>) /
       <kbd>Ctrl+Del</kbd> 行削除 / 摘要は <kbd>F4</kbd> または入力で候補表示、コード入力 + <kbd>Enter</kbd> で展開
-      ${inDialog ? '/ <kbd>Esc</kbd> 閉じる' : ''}
+      ${inDialog ? '/ <kbd>Esc</kbd> 保存して閉じる' : ''}
     </div>
   </div>`;
 
@@ -727,6 +727,8 @@ async function openEntryDialog(entryId, { onChanged, siblings } = {}) {
   let form = null;
   let closeModal = null;
   let pendingTarget = null;     // 保存が終わったら移りたい行 (前後ボタンで使う)
+  let closingNow = false;       // 閉じる途中 (保存しても次の仕訳へ進まない)
+  let discard = false;          // 「破棄して閉じる」を押した
   const multi = list.length > 1;
 
   const { bg, close } = modal(`<div style="width:min(1180px, 90vw)">
@@ -739,7 +741,8 @@ async function openEntryDialog(entryId, { onChanged, siblings } = {}) {
     </div>
     <div id="ed-host"></div>
     <div class="actions">
-      ${multi ? '<span class="muted" style="margin-right:auto">保存すると次の仕訳へ進みます。前後へ移るときも、直した内容は保存されます</span>' : ''}
+      <span class="muted" style="margin-right:auto">直した内容は、閉じるときも${multi ? '前後へ移るときも' : ''}保存されます</span>
+      <button id="ed-discard" class="danger">変更を破棄して閉じる</button>
       <button data-close>閉じる</button></div>
     <div class="entry-dialog-space"></div>
   </div>`, {
@@ -749,6 +752,7 @@ async function openEntryDialog(entryId, { onChanged, siblings } = {}) {
         inDialog: true,
         async onChanged() {
           if (onChanged) await onChanged();      // 呼び出した帳票を引き直す
+          if (closingNow) return;                // 閉じるための保存なので、次へは進まない
           // 保存後に移る先。前後ボタンで保存した場合はその行、ふつうに保存したら次の行
           const target = pendingTarget !== null ? pendingTarget : idx + 1;
           pendingTarget = null;
@@ -759,6 +763,16 @@ async function openEntryDialog(entryId, { onChanged, siblings } = {}) {
         $('#ed-prev', bg).onclick = () => go(-1);
         $('#ed-next', bg).onclick = () => go(1);
       }
+      $('#ed-discard', bg).onclick = () => { discard = true; doClose(); };
+    },
+    // Esc や「閉じる」で直した内容が消えないよう、閉じる前に保存する。
+    // 保存できない状態 (貸借不一致など) のときは閉じずに留まる。
+    async beforeClose() {
+      if (discard || !form || !form.isDirty) return true;
+      closingNow = true;
+      const ok = await form.save();
+      closingNow = false;
+      return ok;
     },
     onClose() {
       document.removeEventListener('keydown', onNavKey);

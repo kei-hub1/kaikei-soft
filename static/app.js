@@ -168,11 +168,21 @@ function showError(e) {
   toast(e && e.message ? e.message : String(e), true);
 }
 
-function modal(html, { onOpen, onClose } = {}) {
+function modal(html, { onOpen, onClose, beforeClose } = {}) {
   const bg = el(`<div class="modal-bg"><div class="modal">${html}</div></div>`);
   document.body.appendChild(bg);
   let closed = false;
-  const close = () => {
+  let closing = false;
+  // beforeClose が false を返したら閉じない (保存できていないときなど)
+  const close = async () => {
+    if (closed || closing) return;
+    if (beforeClose) {
+      closing = true;
+      let ok = true;
+      try { ok = await beforeClose(); } catch (e) { showError(e); ok = false; }
+      closing = false;
+      if (ok === false) return;
+    }
     if (closed) return;
     closed = true;
     bg.remove();
