@@ -22,41 +22,6 @@ const textInput = (name, value = '', attrs = '') => `<input type="text" name="${
 const selectInput = (name, options, value) => `<select name="${name}">${options.map(o => `<option value="${esc(o.value)}" ${String(o.value) === String(value) ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
 const checkInput = (name, checked) => `<input type="checkbox" name="${name}" ${checked ? 'checked' : ''}>`;
 
-/** 資金諸口の貸借一致チェックの結果を、原因の手掛かりつきで表示する。 */
-function suspenseReportHtml(sp, note) {
-  if (!sp || !sp.checked) return '';
-  const head = `<div class="panel neg" style="margin-top:8px">
-    <b>資金諸口の貸借が一致しません。${esc(note || '')}</b>
-    <div style="margin:4px 0">対象科目: ${sp.accounts.map(esc).join(' / ')}</div>
-    <table class="grid compact" style="width:auto;margin:6px 0">
-      <tr><th>ファイル全体</th><th>借方 資金諸口</th><th>貸方 資金諸口</th><th>差額</th></tr>
-      <tr><td></td><td class="num">${fmt(sp.debit)}</td><td class="num">${fmt(sp.credit)}</td>
-        <td class="num ${sp.diff ? 'neg' : ''}">${fmt(sp.diff)}</td></tr></table>
-    ${sp.hints.map(h => `<div>・${esc(h)}</div>`).join('')}
-    <div style="margin-top:4px">合わない伝票: <b>${sp.error_count}</b> 件</div>`;
-
-  const body = sp.voucher_errors.map(v => `
-    <div class="panel" style="margin:8px 0 0;background:#fff">
-      <div class="row between">
-        <b>伝票番号 ${esc(v.vno || '(空欄)')}　${esc(fmtDate(v.date))}</b>
-        <span>借方 ${fmt(v.debit)} / 貸方 ${fmt(v.credit)} → <b class="neg">差額 ${fmt(v.diff)}</b></span>
-      </div>
-      ${v.hints.map(h => `<div class="neg">・${esc(h)}</div>`).join('')}
-      <div class="scroll-x"><table class="grid compact" style="margin-top:4px">
-        <thead><tr><th>CSV の行</th><th>借方科目</th><th>貸方科目</th><th>金額</th><th>摘要</th><th>資金諸口</th></tr></thead>
-        <tbody>${v.rows.map(r => `<tr${r.suspense_side ? '' : ' class="warnrow"'}>
-          <td class="num">${r.rowno}</td><td>${esc(r.debit)}</td><td>${esc(r.credit)}</td>
-          <td class="num">${fmt(r.amount)}</td><td>${esc(r.description)}</td>
-          <td>${r.suspense_side ? esc(r.suspense_side) : '<span class="muted">使っていない</span>'}</td></tr>`).join('')}
-        </tbody></table></div>
-    </div>`).join('');
-
-  const tail = `<label style="display:block;margin-top:10px">
-      <input type="checkbox" id="i-force"> このまま取り込む (資金諸口の不一致を承知のうえで登録します)
-    </label></div>`;
-  return head + body + tail;
-}
-
 /** 補助科目の選択リスト。科目ごとにまとめて出す。 */
 function subPickerHtml(id) {
   const groups = S.accounts
@@ -1040,9 +1005,6 @@ routes.data = async function (main) {
     </div>
     <div class="panel"><h3 style="margin-top:0">仕訳 CSV 取込</h3>
       ${hasClient ? `<p>本ソフトで出力した形式の CSV を取り込みます (UTF-8 / Shift_JIS)。科目はコードまたは科目名で照合します。同じ「日付+伝票番号」の行は 1 伝票にまとめます。<br><b>日付・金額・摘要・補助科目が同じ伝票が既にあれば取り込みません。</b>科目や消費税区分は比較しないので、取り込んだ後に科目を付け替えた仕訳があっても、同じ通帳履歴をもう一度取り込んで二重計上になることはありません。</p><p class="help">下の欄で補助科目を選ぶと、<b>その補助科目が属する科目の行で補助科目が空のものに、まとめて付けます</b> (CSV に補助科目が書いてあればそちらが優先)。通帳ごとに CSV を分けて取り込むときに使います。補助科目で通帳を区別するので、別々の口座に同じ日・同じ金額・同じ摘要の入出金があっても、片方だけ取り込まれないということは起きません。</p>
-      <p class="help"><b>資金諸口の貸借一致を確認します。</b>伝票番号ごと、およびファイル全体で、
-      借方が資金諸口の行の合計と貸方が資金諸口の行の合計を突き合わせます。
-      合わない場合は取り込まず、どの伝票のどの行が原因かを表示します。</p>
       <div class="row" style="margin-bottom:6px"><label class="field" style="flex:1;min-width:260px"><span>補助科目をまとめて付ける (通帳ごとに CSV を分けるとき)</span>
         ${subPickerHtml('i-sub')}</label></div>
       <div class="row"><input type="file" id="i-file" accept=".csv,text/csv"><button id="i-check">検証</button><button id="i-run" class="primary">取込</button></div>
@@ -1063,24 +1025,12 @@ routes.data = async function (main) {
     const f = $('#i-file').files[0];
     if (!f) { toast('CSV ファイルを選択してください', true); return; }
     const fd = new FormData(); fd.append('file', f);
-    // 「このまま取り込む」は結果欄の中にあるので、欄を書き換える前に読む
-    const force = $('#i-force') && $('#i-force').checked ? '&ignore_suspense=true' : '';
     const res = $('#i-result');
     res.innerHTML = '処理中...';
     try {
       const subId = $('#i-sub') ? $('#i-sub').value : '';
-      const r = await api('POST', `/api/clients/${S.client.id}/import/journal?dry_run=${dry}${subId ? `&sub_id=${subId}` : ''}${force}`, fd);
-      if (r.blocked) {
-        res.innerHTML = suspenseReportHtml(r.suspense, dry ? 'このままでは取り込めません。' : 'そのため取り込みませんでした。');
-        syncForceButton();
-        return;
-      }
+      const r = await api('POST', `/api/clients/${S.client.id}/import/journal?dry_run=${dry}${subId ? `&sub_id=${subId}` : ''}`, fd);
       let html = `<span class="badge ok">${dry ? '検証OK' : '取込完了'}</span> ${r.count} 伝票 / ${r.lines} 行`;
-      if (r.suspense && r.suspense.checked) {
-        html += r.suspense.ok
-          ? ` <span class="badge ok">資金諸口 一致 (借方 ${fmt(r.suspense.debit)} / 貸方 ${fmt(r.suspense.credit)})</span>`
-          : ` <span class="badge danger">資金諸口 不一致のまま取り込みました</span>`;
-      }
       if (r.sub_label && r.sub_applied) {
         html += ` <span class="badge ok">${esc(r.sub_label)} を ${r.sub_applied} 行に付け${dry ? 'ます' : 'ました'}</span>`;
       } else if (r.sub_label && r.count) {
@@ -1092,22 +1042,14 @@ routes.data = async function (main) {
           <details style="margin-top:6px"><summary class="muted">登録済みと判定した伝票 (日付・金額・摘要)</summary>
           <ul style="margin:4px 0 0;padding-left:20px;font-size:12px">${r.skipped_samples.map(s => `<li>${esc(s)}</li>`).join('')}${more}</ul></details>`;
       }
-      if (r.suspense && !r.suspense.ok) html += suspenseReportHtml(r.suspense, '');
       res.innerHTML = html;
-      syncForceButton();
       if (!dry) {
         toast(r.count ? `${r.count} 伝票を取り込みました` : '取り込む伝票はありませんでした (すべて登録済み)');
         await loadFiscalYears(true);
       }
-    } catch (e) { res.innerHTML = `<span class="badge danger">エラー</span> ${esc(e.message)}`; syncForceButton(); }
-  }
-  /** 「このまま取り込む」の状態に合わせて取込ボタンの表示を変える。 */
-  function syncForceButton() {
-    const f = $('#i-force');
-    $('#i-run').textContent = f && f.checked ? '不一致でも取込' : '取込';
+    } catch (e) { res.innerHTML = `<span class="badge danger">エラー</span> ${esc(e.message)}`; }
   }
   $('#i-check').onclick = () => upload(true);
-  $('#i-result').addEventListener('change', (e) => { if (e.target.id === 'i-force') syncForceButton(); });
   $('#i-run').onclick = async () => { if (await confirmDialog('CSV を取り込みます。よろしいですか？')) upload(false); };
   if ($('#cf-run')) $('#cf-run').onclick = async () => {
     if (!(await confirmDialog(`${S.fy.label} の繰越処理を実行します。翌期の期首残高は上書きされます。よろしいですか？`))) return;

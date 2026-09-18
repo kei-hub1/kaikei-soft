@@ -187,11 +187,8 @@ def test_csv_roundtrip(client):
     files = {"file": ("journal.csv", io.BytesIO(r.content), "text/csv")}
     dry = client.post(f"/api/clients/{cl2['id']}/import/journal", params={"dry_run": True}, files=files)
     assert dry.status_code == 200, dry.text
-    got = dry.json()
-    assert {k: got[k] for k in ("count", "lines", "skipped", "dry_run", "sub_applied", "sub_label", "blocked")} == {
-        "count": 4, "lines": 6, "skipped": 0, "dry_run": True, "sub_applied": 0, "sub_label": "", "blocked": False}
-    assert got["skipped_samples"] == []
-    assert got["suspense"]["ok"] is True
+    assert dry.json() == {"count": 4, "lines": 6, "skipped": 0, "dry_run": True,
+                          "skipped_samples": [], "sub_applied": 0, "sub_label": ""}
     files = {"file": ("journal.csv", io.BytesIO(r.content), "text/csv")}
     imp = client.post(f"/api/clients/{cl2['id']}/import/journal", files=files)
     assert imp.status_code == 200, imp.text
@@ -831,7 +828,7 @@ def _csv_row(date, dcode, ccode, amount, tax="00", desc="", memo="", vno=""):
     return f"{date},{vno},{dcode},,,,,{ccode},,,,,{amount},{tax},,{desc},{memo}"
 
 
-def _upload_csv(client, cl, lines, dry_run=False, sub_id=None, ignore_suspense=False):
+def _upload_csv(client, cl, lines, dry_run=False, sub_id=None):
     text = "\ufeff日付,伝票番号,借方科目コード,借方科目名,借方補助コード,借方補助名,借方部門コード," \
            "貸方科目コード,貸方科目名,貸方補助コード,貸方補助名,貸方部門コード,金額,消費税区分,消費税額,摘要,伝票メモ\r\n"
     text += "\r\n".join(lines) + "\r\n"
@@ -839,8 +836,6 @@ def _upload_csv(client, cl, lines, dry_run=False, sub_id=None, ignore_suspense=F
     params = {"dry_run": dry_run}
     if sub_id:
         params["sub_id"] = sub_id
-    if ignore_suspense:
-        params["ignore_suspense"] = True
     r = client.post(f"/api/clients/{cl['id']}/import/journal", params=params, files=files)
     assert r.status_code == 200, r.text
     return r.json()
@@ -1061,113 +1056,3 @@ def test_template_can_be_made_from_an_existing_entry(client):
     cl2, _, _ = make_client(client, code="002")
     r = client.post(f"/api/clients/{cl2['id']}/templates/from-entry/{e['id']}")
     assert r.status_code == 404
-
-
-def _tkc_client(client, code="001"):
-    r = client.post("/api/clients", json={"code": code, "name": "不動産", "entity_type": "corp",
-                                          "tax_method": "inclusive", "fiscal_start_month": 1, "chart": "tkc"})
-    cl = r.json()
-    fy = client.get(f"/api/clients/{cl['id']}/fiscal-years").json()[0]
-    acc = {a["code"]: a for a in client.get(f"/api/clients/{cl['id']}/accounts").json()}
-    return cl, fy, acc
-
-
-def _row(date, vno, dr, cr, amount, desc=""):
-    return f"{date},{vno},{dr},,,,,{cr},,,,,{amount},00,,{desc},"
-
-
-def test_suspense_check_passes_when_balanced(client):
-    """資金諸口が借方・貸方で一致していれば取り込める。"""
-    cl, fy, acc = _tkc_client(client)
-    d = fy["start_date"]
-    rows = [_row(d, "107", "9991", "4111", 180000, "振込"),
-            _row(d, "107", "1113", "9991", 173510),
-            _row(d, "107", "6117", "9991", 6490)]
-    # 6117 管理費 を作る
-    client.post(f"/api/clients/{cl['id']}/accounts", json={
-        "code": "6117", "name": "管理費", "kana": "かんりひ", "grp": "販売費及び一般管理費",
-        "default_tax_class": "00", "role": "", "sort_order": 6117, "active": True})
-    r = _upload_csv(client, cl, rows, dry_run=True)
-    assert r["suspense"]["checked"] is True
-    assert r["suspense"]["ok"] is True
-    assert (r["suspense"]["debit"], r["suspense"]["credit"]) == (180000, 180000)
-    assert r["blocked"] is False
-    r = _upload_csv(client, cl, rows)
-    assert r["count"] == 1 and len(_entries(client, fy)) == 1
-
-
-def test_suspense_check_blocks_a_voucher_that_does_not_balance(client):
-    """伝票番号ごとに合わない場合は取り込まず、原因の手掛かりを返す。"""
-    cl, fy, acc = _tkc_client(client)
-    d = fy["start_date"]
-    # 107: 借方諸口 180,000 に対し貸方諸口 173,510 (6,490 の行が諸口を使っていない)
-    rows = [_row(d, "107", "9991", "4111", 180000, "振込"),
-            _row(d, "107", "1113", "9991", 173510),
-            _row(d, "107", "1111", "4111", 6490, "管理費相殺")]
-    r = _upload_csv(client, cl, rows)
-    assert r["blocked"] is True and r["count"] == 0
-    assert len(_entries(client, fy)) == 0          # 1 件も入らない
-    sp = r["suspense"]
-    assert sp["ok"] is False and sp["error_count"] == 1
-    v = sp["voucher_errors"][0]
-    assert (v["vno"], v["debit"], v["credit"], v["diff"]) == ("107", 180000, 173510, 6490)
-    assert any("6,490" in h and "資金諸口を使っていません" in h for h in v["hints"])
-    assert [x["rowno"] for x in v["rows"]] == [2, 3, 4]
-    assert [x["suspense_side"] for x in v["rows"]] == ["借方", "貸方", ""]
-    # 全体でもずれているので、その旨も出る
-    assert sp["diff"] == 6490
-    assert any("ファイル全体で 6,490 円ずれています" in h for h in sp["hints"])
-
-
-def test_suspense_check_finds_a_voucher_number_mixup(client):
-    """全体は合っているのに伝票ごとに合わない場合、打ち消し合う伝票を指摘する。"""
-    cl, fy, acc = _tkc_client(client)
-    d = fy["start_date"]
-    rows = [_row(d, "201", "9991", "4111", 100000),
-            _row(d, "201", "1113", "9991", 60000),
-            _row(d, "202", "1113", "9991", 40000)]      # 本当は 201 に付けるべき行
-    r = _upload_csv(client, cl, rows, dry_run=True)
-    sp = r["suspense"]
-    assert sp["diff"] == 0                              # ファイル全体では合っている
-    assert sp["error_count"] == 2
-    assert any("伝票番号の付け間違い" in h or "どの伝票番号に属するか" in h for h in sp["hints"])
-    v201 = next(v for v in sp["voucher_errors"] if v["vno"] == "201")
-    assert v201["diff"] == 40000
-    assert any("伝票番号 202" in h for h in v201["hints"])
-
-
-def test_suspense_check_can_be_overridden(client):
-    """承知のうえで取り込むこともできる。"""
-    cl, fy, acc = _tkc_client(client)
-    d = fy["start_date"]
-    rows = [_row(d, "301", "9991", "4111", 50000), _row(d, "301", "1113", "9991", 30000)]
-    assert _upload_csv(client, cl, rows)["blocked"] is True
-    r = _upload_csv(client, cl, rows, ignore_suspense=True)
-    assert r["blocked"] is False and r["count"] == 1
-    assert r["suspense"]["ok"] is False                 # 取り込んでも結果は伝える
-
-
-def test_suspense_check_ignores_vouchers_that_do_not_use_it(client):
-    """資金諸口を使っていない仕訳は、このチェックに引っかからない。"""
-    cl, fy, acc = make_client(client)                    # 汎用の科目表 (999 諸口を含む)
-    d = fy["start_date"]
-    r = _upload_csv(client, cl, [_csv_row(d, "111", "400", 50000, desc="入金")], dry_run=True)
-    assert r["suspense"]["checked"] is True              # 諸口の科目はある
-    assert (r["suspense"]["debit"], r["suspense"]["credit"]) == (0, 0)
-    assert r["suspense"]["ok"] is True and r["blocked"] is False
-
-
-def test_suspense_check_is_skipped_without_a_suspense_account(client):
-    """諸口の科目を持たない顧問先では、このチェックは働かない。"""
-    r = client.post("/api/clients", json={"code": "009", "name": "諸口なし", "entity_type": "corp",
-                                          "tax_method": "inclusive", "fiscal_start_month": 1, "chart": "none"})
-    cl = r.json()
-    fy = client.get(f"/api/clients/{cl['id']}/fiscal-years").json()[0]
-    for code, name, grp in [("100", "現金", "流動資産"), ("500", "売上高", "売上高")]:
-        client.post(f"/api/clients/{cl['id']}/accounts", json={
-            "code": code, "name": name, "kana": "", "grp": grp, "default_tax_class": "00",
-            "role": "", "sort_order": int(code), "active": True})
-    d = fy["start_date"]
-    r = _upload_csv(client, cl, [_csv_row(d, "100", "500", 50000, desc="現金売上")], dry_run=True)
-    assert r["suspense"]["checked"] is False
-    assert r["suspense"]["ok"] is True and r["blocked"] is False
