@@ -50,7 +50,9 @@ function createEntryForm(root, opts = {}) {
       <tbody id="e-lines"></tbody>
     </table>
     <div class="entry-footer">
-      <div class="totals">借方 <b id="t-dr">0</b>　貸方 <b id="t-cr">0</b>　差額 <b id="t-diff" class="diff">0</b></div>
+      <div class="totals">借方 <b id="t-dr">0</b>　貸方 <b id="t-cr">0</b>　差額 <b id="t-diff" class="diff">0</b>
+        <span id="t-suspense" class="suspense" hidden>　|　資金諸口 借方 <b id="t-sdr">0</b> / 貸方 <b id="t-scr">0</b>
+          / 差額 <b id="t-sdiff" class="diff">0</b></span></div>
       <div class="actions">
         <button id="e-addrow" title="同じ伝票に行を足します (複合仕訳)">行追加 <kbd>Shift</kbd></button>
         ${inDialog ? '' : '<button id="e-clear">クリア <kbd>Esc</kbd></button>'}
@@ -61,6 +63,7 @@ function createEntryForm(root, opts = {}) {
     <div class="help">
       <kbd>Enter</kbd> 次の項目 / <kbd>Shift+Enter</kbd> 前の項目 / 科目はコード・かな・名称で検索 <kbd>↑↓</kbd> で選択 /
       金額欄で空欄のまま <kbd>Enter</kbd> → 差額を入力 / 摘要欄で <kbd>Enter</kbd> → 貸借一致なら${inDialog ? '保存' : '登録'}、不一致なら行追加 /
+      資金諸口を使うと借方・貸方の合計を表示。釣り合うまで${inDialog ? '保存' : '登録'}できません /
       補助科目がある科目は確定すると候補が開くので <kbd>↑↓</kbd> と <kbd>Enter</kbd> で選択 (不要ならそのまま <kbd>Enter</kbd>) /
       <kbd>Shift</kbd> 単独で押して離すと行追加 (同じ伝票にまとめる) /
       2 行目以降は科目欄で空のまま <kbd>Enter</kbd> → 前の行と同じ科目 (空のまま進むときは <kbd>Tab</kbd>) /
@@ -232,7 +235,8 @@ function createEntryForm(root, opts = {}) {
         const rows = $$('tr', tbody);
         if (tr !== rows[rows.length - 1]) { focusNext(desc); return; }
         const t = computeTotals();
-        if (t.dr > 0 && t.diff === 0) save();
+        // 貸借が合っていても、資金諸口が釣り合っていなければ続きがあるとみて行を足す
+        if (t.dr > 0 && t.diff === 0 && suspenseTotals().diff === 0) save();
         else { addLine({}, true); }
       } else if (e.key === 'F4') {
         e.preventDefault();
@@ -334,6 +338,30 @@ function createEntryForm(root, opts = {}) {
   }
   function markSaved() { typed = false; baseline = snapshot(); }
 
+  /** 資金諸口の科目 (役割が「諸口」、または名称が資金諸口・諸口)。 */
+  function suspenseIds() {
+    return new Set(S.accounts
+      .filter(a => a.role === 'suspense' || a.name === '資金諸口' || a.name === '諸口')
+      .map(a => a.id));
+  }
+
+  /** この伝票の中で、資金諸口が借方・貸方で釣り合っているかを集計する。
+   *  資金諸口は 1 つの取引の中で通過させる科目なので、伝票ごとに借方と貸方が
+   *  同額になっていなければ、どこかの行が抜けているか金額が違う。 */
+  function suspenseTotals() {
+    const ids = suspenseIds();
+    let debit = 0, credit = 0, used = false;
+    if (ids.size) {
+      for (const tr of $$('tr', tbody)) {
+        const l = lineData(tr);
+        if (l.empty) continue;
+        if (ids.has(l.debit_account_id)) { debit += l.amount; used = true; }
+        if (ids.has(l.credit_account_id)) { credit += l.amount; used = true; }
+      }
+    }
+    return { debit, credit, diff: debit - credit, used };
+  }
+
   function computeTotals() {
     let dr = 0, cr = 0;
     for (const tr of $$('tr', tbody)) {
@@ -350,6 +378,16 @@ function createEntryForm(root, opts = {}) {
     const d = q('#t-diff');
     d.textContent = fmt(t.diff);
     d.className = 'diff ' + (t.diff === 0 ? 'ok' : 'ng');
+    // 資金諸口は使っている伝票でだけ出す
+    const sp = suspenseTotals();
+    q('#t-suspense').hidden = !sp.used;
+    if (sp.used) {
+      q('#t-sdr').textContent = fmt(sp.debit);
+      q('#t-scr').textContent = fmt(sp.credit);
+      const sd = q('#t-sdiff');
+      sd.textContent = fmt(sp.diff);
+      sd.className = 'diff ' + (sp.diff === 0 ? 'ok' : 'ng');
+    }
   }
 
   // ---------------------------------------------------------------- フォーカス移動
@@ -427,6 +465,11 @@ function createEntryForm(root, opts = {}) {
     if (!commitPendingInput()) return false;
     const lines = $$('tr', tbody).map(lineData).filter(l => !l.empty);
     if (!lines.length) { toast('仕訳行を入力してください', true); focusFirstLine(); return false; }
+    const sp = suspenseTotals();
+    if (sp.diff !== 0) {
+      toast(`資金諸口の貸借が一致しません (借方 ${fmt(sp.debit)} / 貸方 ${fmt(sp.credit)} / 差額 ${fmt(sp.diff)})`, true);
+      return false;
+    }
     const payload = { entry_date: currentDate, memo: memoInput.value.trim(), lines: lines.map(({ empty, ...l }) => l) };
     const saveBtn = q('#e-save');
     saveBtn.disabled = true;

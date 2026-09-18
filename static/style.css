@@ -148,6 +148,9 @@ table.grid td.muted { color: var(--muted); }
 table.grid td.neg, .neg { color: var(--danger); }
 /* 伝票メモ。目立たせたいので赤字で出す (入力欄・一覧とも) */
 .memo { color: var(--danger); }
+/* 資金諸口の集計 (仕訳入力のフッター) */
+.entry-footer .suspense { color: var(--muted); }
+.entry-footer .suspense b { color: var(--text); }
 /* 一覧内でそのまま編集する入力欄 (勘定科目のマスタ保守など) */
 table.grid td > input[type=text], table.grid td > input:not([type]), table.grid td > select {
   width: 100%;
