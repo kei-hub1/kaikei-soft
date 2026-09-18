@@ -1,0 +1,9 @@
+# 実データ（顧問先情報を含むためコミットしない）
+data/
+*.db
+*.db-wal
+*.db-shm
+
+__pycache__/
+*.pyc
+.venv/
