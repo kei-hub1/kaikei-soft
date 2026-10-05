@@ -1112,3 +1112,113 @@ def test_accounts_check_matches_by_name_like_the_import(client):
     r = client.post(f"/api/clients/{cl['id']}/import/journal/accounts-check",
                     files={"file": ("x.csv", io.BytesIO(body.encode("utf-8")), "text/csv")}).json()
     assert r["missing"] == []
+
+
+def test_plan_fiscal_years():
+    from app.routers.clients import plan_fiscal_years
+    fy = {"id": 1, "label": "", "start_date": "2026-04-01", "end_date": "2027-03-31", "closed": 0,
+          "entry_min": None, "entry_max": None}
+    # 法人 (4 月始まり): 前期を作る
+    assert plan_fiscal_years([fy], ["2026-01-05"], 4, "corp") == [
+        {"action": "create", "start_date": "2025-04-01", "end_date": "2026-03-31", "partial": False}]
+    # 個人に直した顧問先: 仕訳が無ければ、既存の期間を暦年に直す
+    assert plan_fiscal_years([fy], ["2026-01-05", "2026-02-01"], 1, "sole") == [
+        {"action": "adjust", "fy_id": 1, "label": "", "old_start": "2026-04-01", "old_end": "2027-03-31",
+         "start_date": "2026-01-01", "end_date": "2026-12-31"}]
+    # 登録済みの仕訳が新しい期間に収まるなら、直してよい
+    assert plan_fiscal_years([dict(fy, entry_min="2026-05-01", entry_max="2026-09-30")],
+                             ["2026-01-05"], 1, "sole")[0]["action"] == "adjust"
+    # 収まらない仕訳 (2027 年 2 月) があれば動かさず、すき間だけを作る
+    assert plan_fiscal_years([dict(fy, entry_min="2026-05-01", entry_max="2027-02-01")],
+                             ["2026-01-05"], 1, "sole") == [
+        {"action": "create", "start_date": "2026-01-01", "end_date": "2026-03-31", "partial": True}]
+    # 締め切った期間も動かさない
+    assert plan_fiscal_years([dict(fy, closed=1)], ["2026-01-05"], 1, "sole")[0]["partial"] is True
+    # 期間外の日付が無ければ何もしない
+    assert plan_fiscal_years([fy], [], 1, "sole") == []
+
+
+def _period_files(dates):
+    head = ("日付,伝票番号,借方科目コード,借方科目名,借方補助コード,借方補助名,借方部門コード,"
+            "貸方科目コード,貸方科目名,貸方補助コード,貸方補助名,貸方部門コード,金額,消費税区分,消費税額,摘要,伝票メモ\r\n")
+    body = head + "".join(_csv_row(d, "111", "100", 1000 + i, desc=f"取引{i}") + "\r\n" for i, d in enumerate(dates))
+    return lambda: {"file": ("bank.csv", io.BytesIO(body.encode("cp932")), "text/csv")}
+
+
+def test_switching_new_client_to_sole_fixes_its_fiscal_year(client):
+    """法人で作った (まだ何も入力していない) 顧問先を個人に直すと、会計期間も暦年に直る。"""
+    cl, fy, acc = make_client(client)
+    body = {k: cl[k] for k in ("code", "name", "kana", "tax_method", "fiscal_start_month", "note")}
+    r = client.put(f"/api/clients/{cl['id']}", json={**body, "entity_type": "sole"})
+    assert r.status_code == 200, r.text
+    y = date.today().year
+    assert r.json()["fiscal_year_adjusted"]["start_date"] == f"{y}-01-01"
+    fys = client.get(f"/api/clients/{cl['id']}/fiscal-years").json()
+    assert [(f["start_date"], f["end_date"]) for f in fys] == [(f"{y}-01-01", f"{y}-12-31")]
+    # 仕訳があれば、勝手には直さない
+    client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": f"{y}-05-01", "lines": [
+        {"debit_account_id": acc["100"]["id"], "credit_account_id": acc["111"]["id"], "amount": 1}]})
+    r = client.put(f"/api/clients/{cl['id']}", json={**body, "entity_type": "corp"})
+    assert r.json()["fiscal_year_adjusted"] is None
+
+
+def test_import_offers_fiscal_year_for_dates_outside_all_periods(client):
+    """法人 (4 月始まり) で作って仕訳を入れた後に個人へ直した顧問先に、1 月の通帳 CSV を取り込む。"""
+    cl, fy, acc = make_client(client)
+    start = fy["start_date"]                       # 例: 2026-04-01
+    y = int(start[:4])
+    r = client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": f"{y}-05-01", "lines": [
+        {"debit_account_id": acc["100"]["id"], "credit_account_id": acc["111"]["id"], "amount": 1}]})
+    assert r.status_code == 201, r.text
+    body = {k: cl[k] for k in ("code", "name", "kana", "tax_method", "fiscal_start_month", "note")}
+    client.put(f"/api/clients/{cl['id']}", json={**body, "entity_type": "sole"})
+    files = _period_files([f"{y}-01-05", f"{y}-01-20", f"{y}-06-01"])
+
+    # そのまま取り込むと、CSV の行番号と登録済みの会計期間が分かるエラー
+    r = client.post(f"/api/clients/{cl['id']}/import/journal", params={"dry_run": True}, files=files())
+    assert r.status_code == 400
+    assert "CSV 2 行目" in r.json()["detail"] and f"{y}-01-05 を含む会計期間がありません" in r.json()["detail"]
+    assert f"{y}/04/01〜{y + 1}/03/31" in r.json()["detail"]
+
+    chk = client.post(f"/api/clients/{cl['id']}/import/journal/periods-check", files=files()).json()
+    assert chk["uncovered"] == {"count": 2, "rows": [2, 3], "first": f"{y}-01-05", "last": f"{y}-01-20"}
+    assert chk["plan"] == [{"action": "adjust", "fy_id": fy["id"], "label": fy["label"],
+                            "old_start": start, "old_end": fy["end_date"],
+                            "start_date": f"{y}-01-01", "end_date": f"{y}-12-31"}]
+    r = client.post(f"/api/clients/{cl['id']}/import/journal/periods-fix", files=files())
+    assert r.status_code == 200, r.text
+    fys = client.get(f"/api/clients/{cl['id']}/fiscal-years").json()
+    assert [(f["start_date"], f["end_date"], f["entry_count"]) for f in fys] == [(f"{y}-01-01", f"{y}-12-31", 1)]
+    chk = client.post(f"/api/clients/{cl['id']}/import/journal/periods-check", files=files()).json()
+    assert chk["uncovered"]["count"] == 0 and chk["plan"] == []
+    assert _upload_csv_files(client, cl, files())["count"] == 3
+
+
+def _upload_csv_files(client, cl, files):
+    r = client.post(f"/api/clients/{cl['id']}/import/journal", files=files)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_import_period_check_creates_previous_year_and_reports_closed(client):
+    cl, fy, acc = make_client(client)              # 法人 4 月始まり
+    y = int(fy["start_date"][:4])
+    files = _period_files([f"{y}-03-31", fy["start_date"]])
+    chk = client.post(f"/api/clients/{cl['id']}/import/journal/periods-check", files=files()).json()
+    assert chk["plan"] == [{"action": "create", "start_date": f"{y - 1}-04-01", "end_date": f"{y}-03-31",
+                            "partial": False}]
+    client.post(f"/api/clients/{cl['id']}/import/journal/periods-fix", files=files())
+    assert _upload_csv_files(client, cl, files())["count"] == 2
+
+    # 締め切った期間の日付は報告する (自動では解除しない)
+    client.post(f"/api/fiscal-years/{fy['id']}/close")
+    chk = client.post(f"/api/clients/{cl['id']}/import/journal/periods-check",
+                      files=_period_files([fy["start_date"]])()).json()
+    assert chk["closed"][0]["start_date"] == fy["start_date"] and chk["closed"][0]["rows"] == [2]
+
+
+def test_fiscal_year_update_rejects_overlap(client):
+    cl, fy, acc = make_client(client)
+    nxt = client.post(f"/api/clients/{cl['id']}/fiscal-years/next").json()
+    r = client.put(f"/api/fiscal-years/{fy['id']}", json={"start_date": fy["start_date"], "end_date": nxt["start_date"]})
+    assert r.status_code == 409

@@ -50,9 +50,13 @@ def _validate_entry(conn, client_id: int, e: EntryIn) -> dict:
         raise HTTPException(400, "日付は YYYY-MM-DD 形式で入力してください")
     fy = _find_fy(conn, client_id, e.entry_date)
     if fy is None:
-        raise HTTPException(400, f"{e.entry_date} を含む会計期間がありません")
+        fys = conn.execute("SELECT start_date, end_date FROM fiscal_years WHERE client_id=? ORDER BY start_date",
+                           (client_id,)).fetchall()
+        have = "、".join(f'{f["start_date"].replace("-", "/")}〜{f["end_date"].replace("-", "/")}' for f in fys) or "なし"
+        raise HTTPException(400, f"{e.entry_date} を含む会計期間がありません (登録済みの会計期間: {have})。"
+                                 "「顧問先・会計期間」画面で会計期間を追加・修正してください")
     if fy["closed"]:
-        raise HTTPException(409, "この会計期間は締め切られています")
+        raise HTTPException(409, f"{e.entry_date} の会計期間 ({fy['label']}) は締め切られています")
     if not e.lines:
         raise HTTPException(400, "仕訳行がありません")
     client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()

@@ -11,7 +11,7 @@ from __future__ import annotations
 import csv
 import io
 import shutil
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
@@ -21,6 +21,7 @@ from ..master_data import (
     GROUP_MAP, GROUPS, ROLE_NAME_BY_CODE, ROLES, TAX_CLASS_MAP, TAX_CLASSES, TKC_CORP_ONLY, TKC_SOLE_ONLY,
     find_master_account, resolve_bool, resolve_role, resolve_tax_class,
 )
+from .clients import apply_fiscal_year_plan, fiscal_years_with_entries, plan_fiscal_years
 from .journals import EntryIn, LineIn, create_entries_bulk
 
 router = APIRouter(prefix="/api", tags=["io"])
@@ -193,6 +194,7 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
     groups: dict[tuple, EntryIn] = {}
     order: list[tuple] = []
     applied_by_key: dict[tuple, int] = {}   # 補助科目を補った行数 (伝票ごと)
+    first_row: dict[tuple, int] = {}       # 伝票の最初の CSV 行番号 (エラー表示用)
     for rowno, row in enumerate(reader, 2):
         if not any(c.strip() for c in row):
             continue
@@ -226,6 +228,7 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
             description=col(row, "摘要"),
         )
         if key not in groups:
+            first_row[key] = rowno
             groups[key] = EntryIn(entry_date=d, memo=col(row, "伝票メモ"), voucher_no=None, lines=[])
             order.append(key)
         groups[key].lines.append(line)
@@ -233,7 +236,13 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
     entries = [groups[k] for k in order]
     from .journals import _validate_entry
     with db() as conn:
-        validated = [_validate_entry(conn, client_id, e) for e in entries]
+        validated = []
+        for k, e in zip(order, entries):
+            try:
+                validated.append(_validate_entry(conn, client_id, e))
+            except HTTPException as ex:
+                # どの行の伝票かを添える (伝票内の行番号ではなく CSV の行番号)
+                raise HTTPException(ex.status_code, f"CSV {first_row[k]} 行目の伝票: {ex.detail}")
         existing = _existing_fingerprints(conn, client_id, [e.entry_date for e in entries])
 
     # 日付・金額・摘要が一致する伝票が既にあれば取り込まない (二重計上の防止)。
@@ -337,6 +346,82 @@ async def check_import_accounts(client_id: int, file: UploadFile):
             "sole_only": m["code"] in TKC_SOLE_ONLY, "corp_only": m["code"] in TKC_CORP_ONLY,
         })
     return {"entity_type": client["entity_type"], "missing": out}
+
+
+async def _csv_dates(file: UploadFile) -> dict[str, list[int]]:
+    """CSV の日付列を読み、日付 → その日付の CSV 行番号 の対応を返す。読めない日付は除く。"""
+    text = _decode(await file.read())
+    reader = csv.reader(io.StringIO(text))
+    try:
+        header = [h.strip().lstrip("\ufeff") for h in next(reader)]
+    except StopIteration:
+        raise HTTPException(400, "CSV が空です")
+    i = {h: n for n, h in enumerate(header)}.get("日付")
+    if i is None:
+        raise HTTPException(400, "CSV に「日付」の列がありません")
+    out: dict[str, list[int]] = {}
+    for rowno, row in enumerate(reader, 2):
+        if not any(c.strip() for c in row) or i >= len(row):
+            continue
+        d = _norm_date(row[i].strip())
+        try:
+            date.fromisoformat(d)
+        except ValueError:
+            continue
+        out.setdefault(d, []).append(rowno)
+    return out
+
+
+def _period_report(conn, client_id: int, dates: dict[str, list[int]]) -> dict:
+    client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+    if not client:
+        raise HTTPException(404, "顧問先が見つかりません")
+    fys = fiscal_years_with_entries(conn, client_id)
+
+    def fy_of(d):
+        return next((f for f in fys if f["start_date"] <= d <= f["end_date"]), None)
+
+    uncovered = sorted(d for d in dates if fy_of(d) is None)
+    closed: dict[int, dict] = {}
+    for d in sorted(dates):
+        f = fy_of(d)
+        if f and f["closed"]:
+            c = closed.setdefault(f["id"], {"label": f["label"], "start_date": f["start_date"],
+                                            "end_date": f["end_date"], "count": 0, "rows": []})
+            c["count"] += len(dates[d])
+            c["rows"] = (c["rows"] + dates[d])[:8]
+    rows = sorted(r for d in uncovered for r in dates[d])
+    plan = plan_fiscal_years(fys, uncovered, client["fiscal_start_month"], client["entity_type"])
+    return {
+        "entity_type": client["entity_type"], "fiscal_start_month": client["fiscal_start_month"],
+        "fiscal_years": [{k: f[k] for k in ("id", "label", "start_date", "end_date", "closed", "entry_count")}
+                         for f in fys],
+        "uncovered": {"count": len(rows), "rows": rows[:8],
+                      "first": uncovered[0] if uncovered else None, "last": uncovered[-1] if uncovered else None},
+        "closed": list(closed.values()),
+        "plan": plan,
+    }
+
+
+@router.post("/clients/{client_id}/import/journal/periods-check")
+async def check_import_periods(client_id: int, file: UploadFile):
+    """取り込む CSV の日付が、すべて会計期間に収まっているか (締め切った期間でないか) を調べる。
+
+    収まらない日付があれば、顧問先の事業形態・期首月に合わせた会計期間の作り方 (plan) を返す。
+    """
+    dates = await _csv_dates(file)
+    with db() as conn:
+        return _period_report(conn, client_id, dates)
+
+
+@router.post("/clients/{client_id}/import/journal/periods-fix")
+async def fix_import_periods(client_id: int, file: UploadFile):
+    """periods-check で示した会計期間の作成・修正を行う (その時点の状態で計画し直してから)。"""
+    dates = await _csv_dates(file)
+    with db() as conn:
+        rep = _period_report(conn, client_id, dates)
+        done = apply_fiscal_year_plan(conn, client_id, rep["plan"])
+        return {"done": done}
 
 
 def _fingerprint(entry_date: str, memo: str, lines: list[dict]) -> tuple:

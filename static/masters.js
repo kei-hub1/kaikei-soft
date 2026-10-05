@@ -99,6 +99,57 @@ function askMissingAccounts({ missing, entity_type }) {
   });
 }
 
+/**
+ * 取り込む CSV の日付を含む会計期間が無いときに出す。
+ * 顧問先の事業形態・期首月に合わせた会計期間の作成 (または既存の期間の修正) を示し、
+ * その場で直して取込を続けられるようにする。進めてよければ true、やめたら false。
+ */
+function askFiscalYears(r, file) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
+    const d = (x) => fmtDate(x);
+    const u = r.uncovered;
+    const rule = r.entity_type === 'sole' ? '個人事業主 (1月〜12月の暦年)' : `法人 (${r.fiscal_start_month}月始まり)`;
+    const planHtml = r.plan.map(a => a.action === 'adjust'
+      ? `<li>既存の会計期間 <b>${d(a.old_start)}〜${d(a.old_end)}</b> を <b>${d(a.start_date)}〜${d(a.end_date)}</b> に直す
+          <div class="help" style="margin:2px 0 0">この期間に登録済みの仕訳はすべて新しい期間に収まるので、そのまま残ります。</div></li>`
+      : `<li>会計期間 <b>${d(a.start_date)}〜${d(a.end_date)}</b> を作る${a.partial
+        ? '<div class="help" style="margin:2px 0 0;color:var(--danger)">前後の会計期間に挟まれているため、1 年に満たない期間になります。期間の区切りがおかしい場合は、やめて「顧問先・会計期間」画面で直してください。</div>' : ''}</li>`).join('');
+    const have = r.fiscal_years.map(f => `${d(f.start_date)}〜${d(f.end_date)}${f.closed ? ' [締切]' : ''} (仕訳 ${f.entry_count} 件)`).join('<br>') || 'なし';
+    const rowsText = `${u.rows.join(', ')} 行目${u.count > u.rows.length ? ` ほか (計 ${u.count} 行)` : ''}`;
+    const { bg, close } = modal(`<div style="width:min(640px, 92vw)">
+      <h3>CSV の日付を含む会計期間がありません</h3>
+      <p style="margin-top:0">CSV の <b>${d(u.first)}${u.last !== u.first ? `〜${d(u.last)}` : ''}</b> の取引 (CSV の ${esc(rowsText)}) が、
+        ${esc(S.client.name)} のどの会計期間にも入っていません。</p>
+      <table class="grid compact" style="margin:6px 0"><tbody>
+        <tr><th style="width:150px">事業形態・決算期</th><td>${esc(rule)}</td></tr>
+        <tr><th>登録済みの会計期間</th><td>${have}</td></tr></tbody></table>
+      ${r.entity_type === 'sole' && r.fiscal_years.some(f => !f.start_date.endsWith('-01-01'))
+        ? '<div class="panel neg" style="margin:6px 0">1 月始まりでない会計期間があります。法人として作った顧問先を個人に直した場合、会計期間は法人の決算期のまま残ります。</div>' : ''}
+      ${r.plan.length ? `<p style="margin:8px 0 4px">次のように直して取込を続けます:</p><ul style="margin:0;padding-left:20px">${planHtml}</ul>`
+        : '<p>自動では直せません。「顧問先・会計期間」画面で会計期間を追加・修正してください。</p>'}
+      <div class="actions"><button data-close>キャンセル</button>${r.plan.length ? '<button id="fyp-ok" class="primary">この内容で直して取込を続ける</button>' : ''}</div>
+    </div>`, { onClose() { finish(false); } });
+    const ok = $('#fyp-ok', bg);
+    if (!ok) return;
+    ok.focus();
+    ok.onclick = async () => {
+      ok.disabled = true;
+      try {
+        const fd = new FormData(); fd.append('file', file);
+        const res = await api('POST', `/api/clients/${S.client.id}/import/journal/periods-fix`, fd);
+        await loadFiscalYears(true);
+        toast(res.done.map(a => a.action === 'adjust'
+          ? `会計期間を ${d(a.start_date)}〜${d(a.end_date)} に直しました`
+          : `会計期間 ${d(a.start_date)}〜${d(a.end_date)} を作りました`).join('、'));
+        finish(true);
+        close();
+      } catch (e) { ok.disabled = false; showError(e); }
+    };
+  });
+}
+
 /** 補助科目の表示名 (「科目 / 補助科目」)。 */
 function passbookLabel(subId) {
   const x = S.subById[subId];
@@ -1114,7 +1165,13 @@ routes.clients = async function (main) {
         S.clients = await GET('/api/clients');
         await loadClients();
         await selectClient(saved.id, true);
-        draw(); toast('保存しました');
+        draw();
+        const adj = saved.fiscal_year_adjusted;
+        if (adj) toast(`保存しました。会計期間も ${fmtDate(adj.start_date)}〜${fmtDate(adj.end_date)} に直しました`);
+        else if (!isNew && c.entity_type !== body.entity_type && body.entity_type === 'sole'
+          && S.fiscalYears.some(f => !f.start_date.endsWith('-01-01'))) {
+          toast('保存しました。会計期間は直していません (仕訳が登録済みのため)。個人事業主は 1月〜12月 なので、下の会計期間を確かめてください', true);
+        } else toast('保存しました');
       });
   }
   function draw() {
@@ -1244,6 +1301,7 @@ routes.data = async function (main) {
     if (!f) { toast('CSV ファイルを選択してください', true); return; }
     if (!(await ensureSubChoice())) return;
     if (!(await ensureAccountsExist(f))) return;
+    if (!(await ensurePeriodsExist(f))) return;
     if (!dry) {
       const what = subChoice ? `「${passbookLabel(subChoice)}」の通帳として` : '補助科目を指定せずに';
       if (!(await confirmDialog(`${f.name} を${what}取り込みます。よろしいですか？`))) return;
@@ -1281,6 +1339,22 @@ routes.data = async function (main) {
     catch (e) { showError(e); return false; }
     if (!r.missing.length) return true;
     return await askMissingAccounts(r);
+  }
+
+  /** CSV の日付を含む会計期間が無ければ、その場で作る (直す)。締め切った期間の日付があれば止める。進めてよければ true。 */
+  async function ensurePeriodsExist(file) {
+    const fd = new FormData(); fd.append('file', file);
+    let r;
+    try { r = await api('POST', `/api/clients/${S.client.id}/import/journal/periods-check`, fd); }
+    catch (e) { showError(e); return false; }
+    if (r.closed.length) {
+      const c = r.closed[0];
+      $('#i-result').innerHTML = `<span class="badge danger">エラー</span> CSV の ${esc(c.rows.join(', '))}${c.count > c.rows.length ? ' ほか' : ''} 行目 (${c.count} 行) の日付は、
+        締め切った会計期間 ${esc(fmtDate(c.start_date))}〜${esc(fmtDate(c.end_date))} に入ります。取り込む場合は「顧問先・会計期間」画面で締切を解除してください。`;
+      return false;
+    }
+    if (!r.uncovered.count) return true;
+    return await askFiscalYears(r, file);
   }
 
   $('#i-check').onclick = () => upload(true);

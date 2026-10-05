@@ -46,14 +46,113 @@ def _fy_label(start: str, end: str) -> str:
     return f"{s.year}/{s.month:02d}〜{e.year}/{e.month:02d}期"
 
 
-def _default_fy(start_month: int, entity_type: str) -> tuple[str, str]:
-    today = date.today()
+def fy_period_for(d: date, start_month: int, entity_type: str) -> tuple[str, str]:
+    """顧問先の決算期の決まりで、日付 d を含む 1 年間の会計期間 (期首日, 期末日)。
+
+    個人事業主は暦年 (1/1〜12/31)。法人は期首月の 1 日から 1 年間。
+    """
     if entity_type == "sole":
-        return f"{today.year}-01-01", f"{today.year}-12-31"
-    y = today.year if today.month >= start_month else today.year - 1
+        return f"{d.year}-01-01", f"{d.year}-12-31"
+    y = d.year if d.month >= start_month else d.year - 1
     s = date(y, start_month, 1)
     e = (date(y + 1, start_month, 1) - timedelta(days=1))
     return s.isoformat(), e.isoformat()
+
+
+def _default_fy(start_month: int, entity_type: str) -> tuple[str, str]:
+    return fy_period_for(date.today(), start_month, entity_type)
+
+
+def plan_fiscal_years(fys: list[dict], dates: list[str], start_month: int, entity_type: str) -> list[dict]:
+    """dates のどれかを含む会計期間が無いとき、どう直せば全部が収まるかを考える。
+
+    fys: 既存の会計期間 (id, start_date, end_date, label, closed, entry_min, entry_max)
+    戻り値の各要素:
+      {"action": "create", "start_date", "end_date", "partial"}   新しく作る
+      {"action": "adjust", "fy_id", "label", "old_start", "old_end", "start_date", "end_date"}
+          既存の期間の期首日・期末日を直す (法人で作った顧問先を個人に直したときなど)
+    partial=True は、前後の期間に挟まれて 1 年に満たない期間しか作れないもの。
+    """
+    sim = [dict(f) for f in fys]
+    actions: list[dict] = []
+
+    def covered(d: str) -> bool:
+        return any(f["start_date"] <= d <= f["end_date"] for f in sim)
+
+    for _ in range(20):
+        rest = sorted({d for d in dates if not covered(d)})
+        if not rest:
+            break
+        d = rest[0]
+        s, e = fy_period_for(date.fromisoformat(d), start_month, entity_type)
+        over = [f for f in sim if not (f["end_date"] < s or f["start_date"] > e)]
+        if not over:
+            actions.append({"action": "create", "start_date": s, "end_date": e, "partial": False})
+            sim.append({"id": None, "start_date": s, "end_date": e})
+            continue
+        if len(over) == 1:
+            f = over[0]
+            fits = f.get("entry_min") is None or (s <= f["entry_min"] and f["entry_max"] <= e)
+            if f.get("id") and not f.get("closed") and fits:
+                actions.append({"action": "adjust", "fy_id": f["id"], "label": f.get("label", ""),
+                                "old_start": f["start_date"], "old_end": f["end_date"],
+                                "start_date": s, "end_date": e})
+                f["start_date"], f["end_date"] = s, e
+                continue
+        # 既存の期間を動かせないので、前後の期間のすき間だけを作る
+        prev_end = max((f["end_date"] for f in sim if f["end_date"] < d), default=None)
+        next_start = min((f["start_date"] for f in sim if f["start_date"] > d), default=None)
+        gs = max(s, (date.fromisoformat(prev_end) + timedelta(days=1)).isoformat()) if prev_end else s
+        ge = min(e, (date.fromisoformat(next_start) - timedelta(days=1)).isoformat()) if next_start else e
+        actions.append({"action": "create", "start_date": gs, "end_date": ge, "partial": (gs, ge) != (s, e)})
+        sim.append({"id": None, "start_date": gs, "end_date": ge})
+    return actions
+
+
+def fiscal_years_with_entries(conn, client_id: int) -> list[dict]:
+    """会計期間に、登録済み仕訳の最初と最後の日付を添えて返す。"""
+    rows = conn.execute(
+        "SELECT f.id, f.start_date, f.end_date, f.label, f.closed, "
+        "(SELECT MIN(entry_date) FROM journal_entries e WHERE e.fiscal_year_id=f.id) AS entry_min, "
+        "(SELECT MAX(entry_date) FROM journal_entries e WHERE e.fiscal_year_id=f.id) AS entry_max, "
+        "(SELECT COUNT(*) FROM journal_entries e WHERE e.fiscal_year_id=f.id) AS entry_count "
+        "FROM fiscal_years f WHERE client_id=? ORDER BY start_date", (client_id,)).fetchall()
+    return rows_to_dicts(rows)
+
+
+def apply_fiscal_year_plan(conn, client_id: int, actions: list[dict]) -> list[dict]:
+    """plan_fiscal_years の結果を登録する。"""
+    done = []
+    for a in actions:
+        s, e = a["start_date"], a["end_date"]
+        if a["action"] == "create":
+            if conn.execute("SELECT 1 FROM fiscal_years WHERE client_id=? AND NOT (end_date < ? OR start_date > ?)",
+                            (client_id, s, e)).fetchone():
+                raise HTTPException(409, f"{s}〜{e} は既存の会計期間と重複しています")
+            cur = conn.execute("INSERT INTO fiscal_years(client_id,start_date,end_date,label) VALUES(?,?,?,?)",
+                               (client_id, s, e, _fy_label(s, e)))
+            done.append({**a, "fy_id": cur.lastrowid, "label": _fy_label(s, e)})
+        else:
+            _check_fy_change(conn, client_id, a["fy_id"], s, e)
+            conn.execute("UPDATE fiscal_years SET start_date=?, end_date=?, label=? WHERE id=?",
+                         (s, e, _fy_label(s, e), a["fy_id"]))
+            done.append({**a, "label": _fy_label(s, e)})
+    return done
+
+
+def _check_fy_change(conn, client_id: int, fy_id: int, start: str, end: str) -> None:
+    """会計期間の期首日・期末日を変えてよいか。だめなら HTTPException。"""
+    try:
+        if date.fromisoformat(end) <= date.fromisoformat(start):
+            raise HTTPException(400, "期末日は期首日より後にしてください")
+    except ValueError:
+        raise HTTPException(400, "日付は YYYY-MM-DD 形式で入力してください")
+    if conn.execute("SELECT 1 FROM journal_entries WHERE fiscal_year_id=? AND (entry_date < ? OR entry_date > ?)",
+                    (fy_id, start, end)).fetchone():
+        raise HTTPException(409, "期間外となる仕訳が存在するため変更できません")
+    if conn.execute("SELECT 1 FROM fiscal_years WHERE client_id=? AND id<>? AND NOT (end_date < ? OR start_date > ?)",
+                    (client_id, fy_id, start, end)).fetchone():
+        raise HTTPException(409, "ほかの会計期間と重複するため変更できません")
 
 
 @router.get("/clients")
@@ -105,11 +204,30 @@ def update_client(client_id: int, c: ClientIn):
         dup = conn.execute("SELECT 1 FROM clients WHERE code=? AND id<>?", (c.code, client_id)).fetchone()
         if dup:
             raise HTTPException(409, "同じコードの顧問先が既に存在します")
+        before = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
         conn.execute(
             "UPDATE clients SET code=?,name=?,kana=?,entity_type=?,tax_method=?,fiscal_start_month=?,note=? WHERE id=?",
             (c.code, c.name, c.kana, c.entity_type, c.tax_method, c.fiscal_start_month, c.note, client_id),
         )
-        return dict(conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone())
+        out = dict(conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone())
+        out["fiscal_year_adjusted"] = None
+        # 事業形態・期首月を直したとき、まだ何も入力していなければ、
+        # 作成時に自動で作った会計期間も新しい決まりに合わせて作り直す。
+        # (法人で作ってから個人に直すと、4 月始まりの期間のままで 1〜3 月の仕訳が入らないため)
+        rule_changed = (before["entity_type"] != c.entity_type
+                        or (c.entity_type == "corp" and before["fiscal_start_month"] != c.fiscal_start_month))
+        if rule_changed:
+            fys = conn.execute("SELECT * FROM fiscal_years WHERE client_id=?", (client_id,)).fetchall()
+            used = conn.execute("SELECT 1 FROM journal_entries WHERE client_id=? LIMIT 1", (client_id,)).fetchone() or \
+                conn.execute("SELECT 1 FROM opening_balances o JOIN fiscal_years f ON f.id=o.fiscal_year_id "
+                             "WHERE f.client_id=? AND o.amount<>0 LIMIT 1", (client_id,)).fetchone()
+            if len(fys) == 1 and not used and not fys[0]["closed"]:
+                s, e = _default_fy(c.fiscal_start_month, c.entity_type)
+                if (s, e) != (fys[0]["start_date"], fys[0]["end_date"]):
+                    conn.execute("UPDATE fiscal_years SET start_date=?, end_date=?, label=? WHERE id=?",
+                                 (s, e, _fy_label(s, e), fys[0]["id"]))
+                    out["fiscal_year_adjusted"] = {"start_date": s, "end_date": e, "label": _fy_label(s, e)}
+        return out
 
 
 @router.delete("/clients/{client_id}", status_code=204)
@@ -180,11 +298,7 @@ def update_fiscal_year(fy_id: int, f: FiscalYearIn):
         row = conn.execute("SELECT * FROM fiscal_years WHERE id=?", (fy_id,)).fetchone()
         if not row:
             raise HTTPException(404, "会計期間が見つかりません")
-        out = conn.execute(
-            "SELECT 1 FROM journal_entries WHERE fiscal_year_id=? AND (entry_date < ? OR entry_date > ?)",
-            (fy_id, f.start_date, f.end_date)).fetchone()
-        if out:
-            raise HTTPException(409, "期間外となる仕訳が存在するため変更できません")
+        _check_fy_change(conn, row["client_id"], fy_id, f.start_date, f.end_date)
         conn.execute("UPDATE fiscal_years SET start_date=?, end_date=?, label=? WHERE id=?",
                      (f.start_date, f.end_date, f.label or _fy_label(f.start_date, f.end_date), fy_id))
         return dict(conn.execute("SELECT * FROM fiscal_years WHERE id=?", (fy_id,)).fetchone())
