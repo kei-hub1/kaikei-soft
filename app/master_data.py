@@ -481,6 +481,16 @@ def tkc_accounts_for(entity_type: str) -> list[dict]:
     return _build(TKC_ACCOUNTS, set(skip))
 
 
+def find_master_account(code: str) -> dict | None:
+    """TKC・汎用の科目表から、コードが一致する科目を探す。無ければ None。"""
+    for table in (TKC_ACCOUNTS, STANDARD_ACCOUNTS):
+        for c, name, kana, grp, tax, role in table:
+            if c == code:
+                return {"code": c, "name": name, "kana": kana, "grp": grp,
+                        "default_tax_class": tax, "role": role}
+    return None
+
+
 def chart_accounts(chart: str, entity_type: str) -> list[dict]:
     if chart == "none":
         return []

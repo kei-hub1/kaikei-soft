@@ -1056,3 +1056,59 @@ def test_template_can_be_made_from_an_existing_entry(client):
     cl2, _, _ = make_client(client, code="002")
     r = client.post(f"/api/clients/{cl2['id']}/templates/from-entry/{e['id']}")
     assert r.status_code == 404
+
+
+def test_import_reports_accounts_missing_from_the_chart(client):
+    """法人の顧問先に、個人事業主の科目 (9411 事業主貸) を含む CSV を取り込もうとした場合。"""
+    r = client.post("/api/clients", json={"code": "050", "name": "法人", "entity_type": "corp",
+                                          "tax_method": "inclusive", "fiscal_start_month": 4, "chart": "tkc"})
+    cl = r.json()
+    fy = client.get(f"/api/clients/{cl['id']}/fiscal-years").json()[0]
+    d = fy["start_date"]
+    head = ("日付,伝票番号,借方科目コード,借方科目名,借方補助コード,借方補助名,借方部門コード,"
+            "貸方科目コード,貸方科目名,貸方補助コード,貸方補助名,貸方部門コード,金額,消費税区分,消費税額,摘要,伝票メモ\r\n")
+    body = head + "".join([
+        f"{d},,9411,,,,,1113,,,,,10000,00,,ATM引出,\r\n",
+        f"{d},,1113,,,,,9311,,,,,50000,00,,入金,\r\n",
+        f"{d},,9411,,,,,1113,,,,,3000,00,,引出,\r\n",
+        f"{d},,8888,雑な科目,,,,1113,,,,,100,00,,?,\r\n",
+    ])
+    files = lambda: {"file": ("bank.csv", io.BytesIO(body.encode("utf-8")), "text/csv")}
+
+    # 取込そのものは、理由の分かるエラーになる
+    r = client.post(f"/api/clients/{cl['id']}/import/journal", params={"dry_run": True}, files=files())
+    assert r.status_code == 400
+    assert "9411" in r.json()["detail"] and "法人" in r.json()["detail"]
+
+    # 事前チェックで、足りない科目と候補が分かる
+    chk = client.post(f"/api/clients/{cl['id']}/import/journal/accounts-check", files=files()).json()
+    assert chk["entity_type"] == "corp"
+    by = {m["code"]: m for m in chk["missing"]}
+    assert set(by) == {"9411", "9311", "8888"}
+    assert by["9411"]["sole_only"] is True and by["9411"]["count"] == 2 and by["9411"]["rows"] == [2, 4]
+    assert by["9411"]["suggestion"]["name"] == "事業主貸"
+    assert by["9411"]["suggestion"]["grp"] == "純資産"
+    assert by["8888"]["suggestion"]["name"] == "雑な科目"       # 標準に無いコードは CSV の科目名を使う
+    assert by["8888"]["suggestion"]["grp"] == ""                 # 表示区分は画面で選んでもらう
+
+    # 追加すれば取り込める
+    for code in ("9411", "9311"):
+        s = by[code]["suggestion"]
+        assert client.post(f"/api/clients/{cl['id']}/accounts", json={**s, "active": True}).status_code == 201
+    client.post(f"/api/clients/{cl['id']}/accounts", json={
+        "code": "8888", "name": "雑な科目", "grp": "販売費及び一般管理費", "default_tax_class": "00", "role": "", "active": True})
+    assert client.post(f"/api/clients/{cl['id']}/import/journal/accounts-check", files=files()).json()["missing"] == []
+    r = client.post(f"/api/clients/{cl['id']}/import/journal", files=files())
+    assert r.status_code == 200 and r.json()["count"] == 4
+
+
+def test_accounts_check_matches_by_name_like_the_import(client):
+    """コードが無くても科目名で見つかる科目は、足りないものとして扱わない (取込と同じ照合)。"""
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+    head = ("日付,伝票番号,借方科目コード,借方科目名,借方補助コード,借方補助名,借方部門コード,"
+            "貸方科目コード,貸方科目名,貸方補助コード,貸方補助名,貸方部門コード,金額,消費税区分,消費税額,摘要,伝票メモ\r\n")
+    body = head + f"{d},,,現金,,,,,売上高,,,,1000,00,,x,\r\n"
+    r = client.post(f"/api/clients/{cl['id']}/import/journal/accounts-check",
+                    files={"file": ("x.csv", io.BytesIO(body.encode("utf-8")), "text/csv")}).json()
+    assert r["missing"] == []

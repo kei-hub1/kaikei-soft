@@ -18,8 +18,8 @@ from fastapi.responses import FileResponse, Response
 
 from ..db import db, get_db_path
 from ..master_data import (
-    GROUP_MAP, GROUPS, ROLE_NAME_BY_CODE, ROLES, TAX_CLASS_MAP, TAX_CLASSES,
-    resolve_bool, resolve_role, resolve_tax_class,
+    GROUP_MAP, GROUPS, ROLE_NAME_BY_CODE, ROLES, TAX_CLASS_MAP, TAX_CLASSES, TKC_CORP_ONLY, TKC_SOLE_ONLY,
+    find_master_account, resolve_bool, resolve_role, resolve_tax_class,
 )
 from .journals import EntryIn, LineIn, create_entries_bulk
 
@@ -151,6 +151,8 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
         return row[i].strip() if i is not None and i < len(row) else default
 
     with db() as conn:
+        client = conn.execute("SELECT entity_type FROM clients WHERE id=?", (client_id,)).fetchone()
+        entity_type = client["entity_type"] if client else ""
         accts = conn.execute("SELECT id, code, name FROM accounts WHERE client_id=?", (client_id,)).fetchall()
         by_code = {a["code"]: a["id"] for a in accts}
         by_name = {a["name"]: a["id"] for a in accts}
@@ -176,7 +178,8 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
             return by_code[code]
         if name and name in by_name:
             return by_name[name]
-        raise HTTPException(400, f"{rowno} 行目: {side}科目 '{code or name}' が見つかりません")
+        raise HTTPException(400, f"{rowno} 行目: {side}科目 '{code or name}' がこの顧問先の科目表にありません"
+                                 + _missing_account_hint(code, entity_type))
 
     def resolve_sub(aid: int | None, code: str, name: str, rowno: int, side: str) -> int | None:
         if aid is None or (not code and not name):
@@ -262,6 +265,78 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
     created = create_entries_bulk(client_id, fresh)
     result["count"] = created["count"]
     return result
+
+
+def _missing_account_hint(code: str, entity_type: str) -> str:
+    """科目が見つからないときに、考えられる理由を添える。"""
+    m = find_master_account(code) if code else None
+    if code in TKC_SOLE_ONLY and entity_type == "corp":
+        return (f" ({code} {m['name'] if m else ''} は個人事業主の科目です。この顧問先は法人として登録されています)")
+    if code in TKC_CORP_ONLY and entity_type == "sole":
+        return (f" ({code} {m['name'] if m else ''} は法人の科目です。この顧問先は個人事業主として登録されています)")
+    if m:
+        return f" (標準の科目表では {code} {m['name']} です。勘定科目画面で追加できます)"
+    return ""
+
+
+@router.post("/clients/{client_id}/import/journal/accounts-check")
+async def check_import_accounts(client_id: int, file: UploadFile):
+    """取り込む CSV に、この顧問先の科目表に無い科目が含まれていないかを調べる。
+
+    足りない科目には、TKC・汎用の科目表から名称・表示区分・税区分の候補を添えて返す。
+    画面でそのまま追加してから取り込めるようにするため。
+    """
+    text = _decode(await file.read())
+    reader = csv.reader(io.StringIO(text))
+    try:
+        header = [h.strip().lstrip("\ufeff") for h in next(reader)]
+    except StopIteration:
+        raise HTTPException(400, "CSV が空です")
+    idx = {h: i for i, h in enumerate(header)}
+
+    def col(row, name):
+        i = idx.get(name)
+        return row[i].strip() if i is not None and i < len(row) else ""
+
+    with db() as conn:
+        client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+        if not client:
+            raise HTTPException(404, "顧問先が見つかりません")
+        accts = conn.execute("SELECT code, name, role FROM accounts WHERE client_id=?", (client_id,)).fetchall()
+    codes = {a["code"] for a in accts}
+    names = {a["name"] for a in accts}
+    used_roles = {a["role"] for a in accts if a["role"]}
+
+    missing: dict[str, dict] = {}
+    for rowno, row in enumerate(reader, 2):
+        if not any(c.strip() for c in row):
+            continue
+        for ccol, ncol in (("借方科目コード", "借方科目名"), ("貸方科目コード", "貸方科目名")):
+            code, name = col(row, ccol), col(row, ncol)
+            if not code and not name:
+                continue
+            # 取込と同じ照合 (コード → 科目名の順) で見つかるものは問題ない
+            if (code and code in codes) or (name and name in names):
+                continue
+            m = missing.setdefault(code or f"名称:{name}", {"code": code, "csv_name": name, "rows": [], "count": 0})
+            m["count"] += 1
+            if len(m["rows"]) < 8:
+                m["rows"].append(rowno)
+            if name and not m["csv_name"]:
+                m["csv_name"] = name
+
+    out = []
+    for m in missing.values():
+        sug = find_master_account(m["code"]) if m["code"] else None
+        if sug is None and m["csv_name"]:
+            sug = {"code": m["code"], "name": m["csv_name"], "kana": "", "grp": "", "default_tax_class": "00", "role": ""}
+        if sug and sug["role"] in used_roles:
+            sug = dict(sug, role="")     # 同じ役割の科目が既にあれば、役割は付けない
+        out.append({
+            **m, "suggestion": sug,
+            "sole_only": m["code"] in TKC_SOLE_ONLY, "corp_only": m["code"] in TKC_CORP_ONLY,
+        })
+    return {"entity_type": client["entity_type"], "missing": out}
 
 
 def _fingerprint(entry_date: str, memo: str, lines: list[dict]) -> tuple:

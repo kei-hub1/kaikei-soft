@@ -22,6 +22,83 @@ const textInput = (name, value = '', attrs = '') => `<input type="text" name="${
 const selectInput = (name, options, value) => `<select name="${name}">${options.map(o => `<option value="${esc(o.value)}" ${String(o.value) === String(value) ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
 const checkInput = (name, checked) => `<input type="checkbox" name="${name}" ${checked ? 'checked' : ''}>`;
 
+/**
+ * 取り込む CSV に、この顧問先の科目表に無い科目があったときに出す。
+ * 標準の科目表から名称・表示区分を候補として入れておき、確認のうえで追加する。
+ * 追加して進めてよければ true、やめたら false。
+ */
+function askMissingAccounts({ missing, entity_type }) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
+    const isCorp = entity_type === 'corp';
+    const soleOnly = missing.filter(m => m.sole_only);
+    const corpOnly = missing.filter(m => m.corp_only);
+    const grpOptions = (sel) => '<option value="">(選んでください)</option>' + S.meta.groups
+      .map(g => `<option ${g.grp === sel ? 'selected' : ''}>${esc(g.grp)}</option>`).join('');
+    const roleName = (code) => ((S.meta.roles || []).find(r => r.code === code) || {}).name || '';
+
+    let warn = '';
+    if (isCorp && soleOnly.length) {
+      warn = `<div class="panel neg" style="margin:8px 0"><b>この顧問先は「法人」として登録されています。</b><br>
+        ${soleOnly.map(m => `${esc(m.code)} ${esc((m.suggestion || {}).name || '')}`).join('、')} は個人事業主の科目です。
+        個人事業主の顧問先であれば、「顧問先・会計期間」で事業形態を「個人」に直してください
+        (直しても科目は自動では増えないので、ここで追加してください)。</div>`;
+    } else if (!isCorp && corpOnly.length) {
+      warn = `<div class="panel neg" style="margin:8px 0"><b>この顧問先は「個人事業主」として登録されています。</b><br>
+        ${corpOnly.map(m => `${esc(m.code)} ${esc((m.suggestion || {}).name || '')}`).join('、')} は法人の科目です。</div>`;
+    }
+
+    const rows = missing.map((m, i) => {
+      const s = m.suggestion || {};
+      const rowsText = m.rows.join(', ') + (m.count > m.rows.length ? ` ほか (${m.count} 行)` : ` (${m.count} 行)`);
+      return `<tr data-i="${i}">
+        <td>${m.code ? `<span class="code">${esc(m.code)}</span>` : `<input data-f="code" style="width:70px" placeholder="コード">`}</td>
+        <td><input data-f="name" value="${esc(s.name || m.csv_name || '')}" style="width:100%"></td>
+        <td><select data-f="grp">${grpOptions(s.grp)}</select></td>
+        <td class="muted">${s.role ? esc(roleName(s.role)) : ''}</td>
+        <td class="muted" style="font-size:12px">${esc(rowsText)}</td></tr>`;
+    }).join('');
+
+    const { bg, close } = modal(`<div style="width:min(820px, 92vw)">
+      <h3>この顧問先の科目表に無い科目があります</h3>
+      <p class="help" style="margin-top:0">取り込む CSV で使われている科目が、${esc(S.client.name)} の科目表にありません。
+        内容を確かめて追加すると、そのまま取り込みに進みます。</p>
+      ${warn}
+      <div class="scroll-x"><table class="grid compact" id="ma-table">
+        <thead><tr><th style="width:80px">コード</th><th>科目名</th><th style="width:170px">表示区分</th><th style="width:90px">役割</th><th style="width:150px">CSV の行</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      <div class="actions"><button data-close>キャンセル</button><button id="ma-ok" class="primary">追加して取込を続ける</button></div>
+    </div>`, { onClose() { finish(false); } });
+
+    $('#ma-ok', bg).onclick = async () => {
+      const items = [];
+      for (const tr of $$('#ma-table tbody tr', bg)) {
+        const m = missing[Number(tr.dataset.i)];
+        const s = m.suggestion || {};
+        const code = m.code || tr.querySelector('[data-f=code]').value.trim();
+        const name = tr.querySelector('[data-f=name]').value.trim();
+        const grp = tr.querySelector('[data-f=grp]').value;
+        if (!code || !name || !grp) {
+          toast(`${m.code || m.csv_name}: コード・科目名・表示区分を入れてください`, true);
+          (tr.querySelector('[data-f=code]') || tr.querySelector(grp ? '[data-f=name]' : '[data-f=grp]')).focus();
+          return;
+        }
+        items.push({ code, name, kana: s.kana || '', grp, default_tax_class: s.default_tax_class || '00', role: s.role || '', active: true });
+      }
+      try {
+        for (const a of items) await POST(`/api/clients/${S.client.id}/accounts`, a);
+        await loadAccounts();
+        toast(`${items.map(a => `${a.code} ${a.name}`).join('、')} を追加しました`);
+        finish(true);
+        close();
+      } catch (e) { showError(e); }
+    };
+    const first = $('#ma-table input, #ma-table select', bg);
+    if (first) first.focus();
+  });
+}
+
 /** 補助科目の表示名 (「科目 / 補助科目」)。 */
 function passbookLabel(subId) {
   const x = S.subById[subId];
@@ -1166,6 +1243,7 @@ routes.data = async function (main) {
     const f = $('#i-file').files[0];
     if (!f) { toast('CSV ファイルを選択してください', true); return; }
     if (!(await ensureSubChoice())) return;
+    if (!(await ensureAccountsExist(f))) return;
     if (!dry) {
       const what = subChoice ? `「${passbookLabel(subChoice)}」の通帳として` : '補助科目を指定せずに';
       if (!(await confirmDialog(`${f.name} を${what}取り込みます。よろしいですか？`))) return;
@@ -1195,6 +1273,16 @@ routes.data = async function (main) {
       }
     } catch (e) { res.innerHTML = `<span class="badge danger">エラー</span> ${esc(e.message)}`; }
   }
+  /** CSV に、この顧問先の科目表に無い科目があれば、その場で追加してもらう。進めてよければ true。 */
+  async function ensureAccountsExist(file) {
+    const fd = new FormData(); fd.append('file', file);
+    let r;
+    try { r = await api('POST', `/api/clients/${S.client.id}/import/journal/accounts-check`, fd); }
+    catch (e) { showError(e); return false; }
+    if (!r.missing.length) return true;
+    return await askMissingAccounts(r);
+  }
+
   $('#i-check').onclick = () => upload(true);
   $('#i-run').onclick = () => upload(false);
   if ($('#cf-run')) $('#cf-run').onclick = async () => {
