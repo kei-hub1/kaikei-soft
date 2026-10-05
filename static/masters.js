@@ -22,16 +22,127 @@ const textInput = (name, value = '', attrs = '') => `<input type="text" name="${
 const selectInput = (name, options, value) => `<select name="${name}">${options.map(o => `<option value="${esc(o.value)}" ${String(o.value) === String(value) ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
 const checkInput = (name, checked) => `<input type="checkbox" name="${name}" ${checked ? 'checked' : ''}>`;
 
-/** 補助科目の選択リスト。科目ごとにまとめて出す。 */
-function subPickerHtml(id) {
-  const groups = S.accounts
-    .filter(a => (S.subsByAccount[a.id] || []).some(x => x.active))
-    .map(a => `<optgroup label="${esc(a.code)} ${esc(a.name)}">` +
-      (S.subsByAccount[a.id] || []).filter(x => x.active)
-        .map(x => `<option value="${x.id}">${esc(x.code)} ${esc(x.name)}</option>`).join('') + '</optgroup>').join('');
-  if (!groups) return '<select disabled><option>補助科目が登録されていません</option></select>';
-  return `<select id="${id}"><option value="">(指定しない)</option>${groups}</select>`;
+/** 補助科目の表示名 (「科目 / 補助科目」)。 */
+function passbookLabel(subId) {
+  const x = S.subById[subId];
+  if (!x) return '';
+  const a = S.accountById[x.account_id];
+  return `${a ? `${a.code} ${a.name}` : ''} / ${x.code} ${x.name}`;
 }
+
+/** 預金・貯金の科目か (通帳の補助科目を置く科目を先に並べるのに使う)。 */
+const isDepositAccount = (a) => /預金|貯金/.test(a.name);
+
+/** その科目の補助科目で、次に使うコード (01, 02 … と桁をそろえる)。 */
+function nextSubCode(accountId) {
+  const codes = (S.subsByAccount[accountId] || []).map(x => x.code).filter(c => /^\d+$/.test(c));
+  const n = codes.length ? Math.max(...codes.map(Number)) + 1 : 1;
+  const width = Math.max(2, ...codes.map(c => c.length));
+  return String(n).padStart(width, '0');
+}
+
+/**
+ * 通帳の CSV を取り込む前に、どの通帳 (補助科目) のものかを聞く。
+ * 登録されていない通帳は、その場で補助科目として登録できる。
+ * 戻り値: 補助科目の id / '' (指定しない) / null (やめた)
+ */
+function askPassbookSub({ fileName = '', current = null } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
+    const bank = S.accounts.find(a => a.active && a.name === '普通預金')
+      || S.accounts.find(a => a.active && isDepositAccount(a)) || null;
+
+    const { bg, close } = modal(`<div style="width:min(600px, 90vw)">
+      <h3>どの通帳の CSV ですか？</h3>
+      ${fileName ? `<div class="muted" style="margin:-6px 0 6px">ファイル: ${esc(fileName)}</div>` : ''}
+      <p class="help" style="margin-top:0">選んだ補助科目は、その科目の行で補助科目が空のものにまとめて付きます。</p>
+      <div id="ps-list" class="ps-list"></div>
+      <details id="ps-new" style="margin-top:10px"><summary><b>新しい通帳 (補助科目) を登録する</b></summary>
+        <div class="row" style="gap:8px;margin-top:6px;align-items:flex-end;flex-wrap:wrap">
+          <label class="field"><span>科目</span><input id="ps-acct" style="width:170px" placeholder="コード・かな・名称"></label>
+          <label class="field"><span>コード</span><input id="ps-code" style="width:70px" maxlength="10"></label>
+          <label class="field" style="flex:1;min-width:170px"><span>名称 (銀行・支店・種別など)</span><input id="ps-name" placeholder="例: JA 本店 普通"></label>
+          <button id="ps-add">登録して選ぶ</button>
+        </div>
+      </details>
+      <div class="actions"><span class="muted" style="margin-right:auto"><kbd>↑↓</kbd> 選択 <kbd>Enter</kbd> 決定</span>
+        <button data-close>キャンセル</button><button id="ps-ok" class="primary">この通帳で進む</button></div>
+    </div>`, { onClose() { finish(null); } });
+
+    function draw(checked) {
+      const accts = S.accounts
+        .filter(a => (S.subsByAccount[a.id] || []).some(x => x.active))
+        .sort((a, b) => (isDepositAccount(b) - isDepositAccount(a)) || (a.sort_order - b.sort_order));
+      let html = '';
+      for (const a of accts) {
+        html += `<div class="ps-group">${esc(a.code)} ${esc(a.name)}</div>`;
+        for (const x of S.subsByAccount[a.id].filter(x => x.active)) {
+          html += `<label class="ps-item"><input type="radio" name="ps" value="${x.id}" ${String(x.id) === String(checked) ? 'checked' : ''}>
+            <span class="code">${esc(x.code)}</span> ${esc(x.name)}</label>`;
+        }
+      }
+      if (!accts.length) html += '<div class="muted" style="padding:4px 2px">通帳 (補助科目) はまだ登録されていません。下で登録してください。</div>';
+      html += `<label class="ps-item ps-none"><input type="radio" name="ps" value="" ${checked === '' ? 'checked' : ''}> 補助科目を指定しない</label>`;
+      $('#ps-list', bg).innerHTML = html;
+      return accts.length;
+    }
+
+    const acctCombo = makeCombo($('#ps-acct', bg), {
+      items: () => S.accounts.filter(a => a.active),
+      onChange: (it) => { if (it) $('#ps-code', bg).value = nextSubCode(it.id); },
+      onCommit: () => $('#ps-code', bg).focus(),
+    });
+    if (bank) { acctCombo.set(bank.id); $('#ps-code', bg).value = nextSubCode(bank.id); }
+
+    async function addSub() {
+      const aid = acctCombo.id;
+      const code = $('#ps-code', bg).value.trim();
+      const name = $('#ps-name', bg).value.trim();
+      if (!aid) { toast('科目を選んでください', true); $('#ps-acct', bg).focus(); return; }
+      if (!code || !name) { toast('コードと名称を入力してください', true); (code ? $('#ps-name', bg) : $('#ps-code', bg)).focus(); return; }
+      try {
+        const sub = await POST(`/api/accounts/${aid}/sub-accounts`, { code, name });
+        await loadAccounts();
+        draw(sub.id);
+        toast(`「${passbookLabel(sub.id)}」を登録しました`);
+        $('#ps-new', bg).open = false;
+        $('#ps-name', bg).value = '';
+        $('#ps-code', bg).value = nextSubCode(aid);
+        const r = $('input[name=ps]:checked', bg);
+        if (r) r.focus();
+      } catch (e) { showError(e); }
+    }
+
+    function ok() {
+      // カーソルが当たっている通帳で Enter を押したら、それを選んだことにする
+      const a = document.activeElement;
+      if (!$('input[name=ps]:checked', bg) && a && a.name === 'ps' && bg.contains(a)) a.checked = true;
+      const r = $('input[name=ps]:checked', bg);
+      if (!r) { toast('通帳を選ぶか、「補助科目を指定しない」を選んでください', true); return; }
+      finish(r.value === '' ? '' : Number(r.value));
+      close();
+    }
+
+    $('#ps-add', bg).onclick = addSub;
+    $('#ps-ok', bg).onclick = ok;
+    $('#ps-name', bg).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addSub(); } });
+    $('#ps-code', bg).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#ps-name', bg).focus(); } });
+    $('#ps-list', bg).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); ok(); } });
+    $('#ps-list', bg).addEventListener('dblclick', (e) => { if (e.target.closest('.ps-item')) ok(); });
+
+    // 前に選んでいたものがあれば印を付けておく (ファイルを選び直したときは何も選ばない)
+    const has = draw(current === null ? null : current);
+    if (!has) {
+      $('#ps-new', bg).open = true;         // 1 冊も無ければ、まず登録してもらう
+      $('#ps-name', bg).focus();
+    } else {
+      const first = $('input[name=ps]:checked', bg) || $('input[name=ps]', bg);
+      if (first) first.focus();
+    }
+  });
+}
+
 // ---------------------------------------------------------------- 勘定科目
 routes.accounts = async function (main) {
   // 編集中の行データ。id が null の行は新規追加。
@@ -1004,10 +1115,11 @@ routes.data = async function (main) {
       <a class="btn" href="/api/fiscal-years/${S.fy ? S.fy.id : 0}/export/journal.csv">仕訳 CSV をダウンロード</a>` : '<p class="muted">顧問先を選択してください</p>'}
     </div>
     <div class="panel"><h3 style="margin-top:0">仕訳 CSV 取込</h3>
-      ${hasClient ? `<p>本ソフトで出力した形式の CSV を取り込みます (UTF-8 / Shift_JIS)。科目はコードまたは科目名で照合します。同じ「日付+伝票番号」の行は 1 伝票にまとめます。<br><b>日付・金額・摘要・補助科目が同じ伝票が既にあれば取り込みません。</b>科目や消費税区分は比較しないので、取り込んだ後に科目を付け替えた仕訳があっても、同じ通帳履歴をもう一度取り込んで二重計上になることはありません。</p><p class="help">下の欄で補助科目を選ぶと、<b>その補助科目が属する科目の行で補助科目が空のものに、まとめて付けます</b> (CSV に補助科目が書いてあればそちらが優先)。通帳ごとに CSV を分けて取り込むときに使います。補助科目で通帳を区別するので、別々の口座に同じ日・同じ金額・同じ摘要の入出金があっても、片方だけ取り込まれないということは起きません。</p>
-      <div class="row" style="margin-bottom:6px"><label class="field" style="flex:1;min-width:260px"><span>補助科目をまとめて付ける (通帳ごとに CSV を分けるとき)</span>
-        ${subPickerHtml('i-sub')}</label></div>
+      ${hasClient ? `<p>本ソフトで出力した形式の CSV を取り込みます (UTF-8 / Shift_JIS)。科目はコードまたは科目名で照合します。同じ「日付+伝票番号」の行は 1 伝票にまとめます。<br><b>日付・金額・摘要・補助科目が同じ伝票が既にあれば取り込みません。</b>科目や消費税区分は比較しないので、取り込んだ後に科目を付け替えた仕訳があっても、同じ通帳履歴をもう一度取り込んで二重計上になることはありません。</p><p class="help"><b>ファイルを選ぶと、どの通帳 (補助科目) のものかを必ず確認します。</b>選んだ補助科目は、<b>その補助科目が属する科目の行で補助科目が空のものに、まとめて付けます</b> (CSV に補助科目が書いてあればそちらが優先)。まだ登録していない通帳は、その場で登録できます。補助科目で通帳を区別するので、別々の口座に同じ日・同じ金額・同じ摘要の入出金があっても、片方だけ取り込まれないということは起きません。</p>
       <div class="row"><input type="file" id="i-file" accept=".csv,text/csv"><button id="i-check">検証</button><button id="i-run" class="primary">取込</button></div>
+      <div class="row" style="margin-top:6px;gap:8px;align-items:center">
+        <span class="muted">通帳 (補助科目):</span><b id="i-sub-label" class="muted">ファイルを選ぶと確認します</b>
+        <button id="i-sub-change" class="small">選び直す / 通帳を登録</button></div>
       <div id="i-result" style="margin-top:8px"></div>
       <details style="margin-top:8px"><summary class="muted">CSV の列</summary><code style="font-size:11px">日付, 伝票番号, 借方科目コード, 借方科目名, 借方補助コード, 借方補助名, 借方部門コード, 貸方科目コード, 貸方科目名, 貸方補助コード, 貸方補助名, 貸方部門コード, 金額, 消費税区分, 消費税額, 摘要, 伝票メモ</code></details>` : '<p class="muted">顧問先を選択してください</p>'}
     </div>
@@ -1021,14 +1133,48 @@ routes.data = async function (main) {
     </div>
   </div>`;
   if (!hasClient) return;
+
+  // この CSV をどの通帳 (補助科目) として取り込むか。
+  //   null = まだ決めていない (取込前に必ず聞く) / '' = 指定しない / 数字 = 補助科目の id
+  // ファイルを選び直したら決め直す。通帳ごとに CSV が分かれているので、前の選択は引き継がない。
+  let subChoice = null;
+  function showSubChoice() {
+    const el_ = $('#i-sub-label');
+    if (subChoice === null) { el_.textContent = $('#i-file').files[0] ? '未選択 (取込前に確認します)' : 'ファイルを選ぶと確認します'; el_.className = 'muted'; }
+    else if (subChoice === '') { el_.textContent = '指定しない'; el_.className = ''; }
+    else { el_.textContent = passbookLabel(subChoice); el_.className = ''; }
+  }
+  /** 通帳が未定なら聞く。決まれば true、やめたら false。 */
+  async function ensureSubChoice({ force = false } = {}) {
+    if (subChoice !== null && !force) return true;
+    const f = $('#i-file').files[0];
+    const v = await askPassbookSub({ fileName: f ? f.name : '', current: subChoice });
+    if (v === null) return false;
+    subChoice = v;
+    showSubChoice();
+    return true;
+  }
+  $('#i-file').addEventListener('change', async () => {
+    subChoice = null;
+    showSubChoice();
+    $('#i-result').innerHTML = '';
+    if ($('#i-file').files[0]) await ensureSubChoice();
+  });
+  $('#i-sub-change').onclick = () => ensureSubChoice({ force: true });
+
   async function upload(dry) {
     const f = $('#i-file').files[0];
     if (!f) { toast('CSV ファイルを選択してください', true); return; }
+    if (!(await ensureSubChoice())) return;
+    if (!dry) {
+      const what = subChoice ? `「${passbookLabel(subChoice)}」の通帳として` : '補助科目を指定せずに';
+      if (!(await confirmDialog(`${f.name} を${what}取り込みます。よろしいですか？`))) return;
+    }
     const fd = new FormData(); fd.append('file', f);
     const res = $('#i-result');
     res.innerHTML = '処理中...';
     try {
-      const subId = $('#i-sub') ? $('#i-sub').value : '';
+      const subId = subChoice || '';
       const r = await api('POST', `/api/clients/${S.client.id}/import/journal?dry_run=${dry}${subId ? `&sub_id=${subId}` : ''}`, fd);
       let html = `<span class="badge ok">${dry ? '検証OK' : '取込完了'}</span> ${r.count} 伝票 / ${r.lines} 行`;
       if (r.sub_label && r.sub_applied) {
@@ -1050,7 +1196,7 @@ routes.data = async function (main) {
     } catch (e) { res.innerHTML = `<span class="badge danger">エラー</span> ${esc(e.message)}`; }
   }
   $('#i-check').onclick = () => upload(true);
-  $('#i-run').onclick = async () => { if (await confirmDialog('CSV を取り込みます。よろしいですか？')) upload(false); };
+  $('#i-run').onclick = () => upload(false);
   if ($('#cf-run')) $('#cf-run').onclick = async () => {
     if (!(await confirmDialog(`${S.fy.label} の繰越処理を実行します。翌期の期首残高は上書きされます。よろしいですか？`))) return;
     try {
