@@ -46,9 +46,16 @@ echo   財務エントリ を起動します。ブラウザが自動的に開きます。
 echo   終了するときは、このウィンドウで Ctrl+C を押すか、ウィンドウを閉じてください。
 echo.
 %PY% run.py %*
+if errorlevel 3 goto :already
 echo.
 echo   財務エントリ を終了しました。
 pause
+exit /b 0
+
+:already
+rem run.py exits with code 3 when the server is already running (opened in the browser).
+echo   財務エントリ はすでに起動しています。ブラウザで開きました。
+timeout /t 3 >nul 2>nul
 exit /b 0
 
 :no_python

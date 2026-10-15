@@ -399,7 +399,7 @@ routes.accounts = async function (main) {
         該当する科目の「役割」欄で選んでください。</div>`);
     }
     $('#a-todo').innerHTML = parts.length
-      ? `<div class="panel" style="border-color:#f59e0b;background:var(--warn-bg)">${parts.join('<div style="height:6px"></div>')}</div>` : '';
+      ? `<div class="panel" style="border-color:var(--warn-border);background:var(--warn-bg)">${parts.join('<div style="height:6px"></div>')}</div>` : '';
   }
 
   $('#a-table').addEventListener('input', (e) => {
@@ -1239,6 +1239,45 @@ routes.clients = async function (main) {
   draw();
 };
 
+/** データ管理画面の「PC 起動時の自動起動」と「終了」。 */
+function bindSystemPanel() {
+  const st = $('#as-status');
+  if (!st) return;
+  const draw = (s) => {
+    if (!s.supported) {
+      st.innerHTML = `<span class="badge">対象外</span> ${esc(s.problem)}`;
+      $$('#as-on, #as-off, #as-browser').forEach(x => { x.disabled = true; });
+      return;
+    }
+    if (s.registered && !s.problem) {
+      st.innerHTML = `<span class="badge ok">有効</span> Windows にサインインすると自動で起動します${s.open_browser ? ' (ブラウザで画面も開きます)' : ' (画面は開きません)'}。`;
+      $('#as-on').textContent = '設定し直す';
+    } else if (s.problem) {
+      st.innerHTML = `<span class="badge danger">要対応</span> ${esc(s.problem)}`;
+      $('#as-on').textContent = '設定し直す';
+    } else {
+      st.innerHTML = '<span class="badge">未設定</span> PC を起動しても、財務エントリは自動では立ち上がりません。';
+      $('#as-on').textContent = '自動起動を有効にする';
+    }
+    $('#as-browser').checked = s.open_browser;
+    $('#as-off').disabled = !s.registered && !s.legacy;
+  };
+  GET('/api/system/autostart').then(draw).catch(e => { st.textContent = e.message; });
+  $('#as-on').onclick = async () => {
+    try { draw(await PUT('/api/system/autostart', { enabled: true, open_browser: $('#as-browser').checked })); toast('自動起動を設定しました。次に PC を起動したときから立ち上がります'); }
+    catch (e) { showError(e); }
+  };
+  $('#as-off').onclick = async () => {
+    try { draw(await PUT('/api/system/autostart', { enabled: false })); toast('自動起動をやめました'); }
+    catch (e) { showError(e); }
+  };
+  $('#sys-quit').onclick = async () => {
+    if (!(await confirmDialog('財務エントリを終了します。もう一度使うときは start.bat を実行するか、PC を再起動してください。よろしいですか？'))) return;
+    try { await POST('/api/system/shutdown'); } catch (e) { showError(e); return; }
+    document.body.innerHTML = '<div class="empty" style="padding:60px">財務エントリを終了しました。このタブは閉じてかまいません。</div>';
+  };
+}
+
 // ---------------------------------------------------------------- データ管理
 routes.data = async function (main) {
   const hasClient = !!S.client;
@@ -1261,11 +1300,20 @@ routes.data = async function (main) {
       ${hasClient && S.fy ? `<p>「${esc(S.fy.label)}」の期末残高を翌期の期首残高へ転記します。翌期が無い場合は自動作成します。当期純利益は ${S.client.entity_type === 'sole' ? '元入金' : '繰越利益剰余金'} へ加算されます。<br>翌期の期首残高は上書きされます。決算確定後に実行してください (何度でも再実行できます)。</p>
       <button id="cf-run" class="primary">繰越処理を実行</button>` : '<p class="muted">顧問先を選択してください</p>'}
     </div>
+    <div class="panel"><h3 style="margin-top:0">PC 起動時の自動起動</h3>
+      <div id="as-status" class="muted">確認しています...</div>
+      <label class="row" style="margin-top:8px;gap:6px"><input type="checkbox" id="as-browser" checked> サインインしたら、ブラウザで画面も開く</label>
+      <div class="row" style="margin-top:8px"><button id="as-on" class="primary">自動起動を有効にする</button><button id="as-off">自動起動をやめる</button></div>
+      <p class="help">Windows にサインインすると、財務エントリが窓を出さずに起動します。止めるときは下の「財務エントリを終了」を使います。</p>
+      <div class="row" style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px"><button id="sys-quit" class="danger">財務エントリを終了</button>
+        <span class="help" style="margin:0">更新 (update.bat) の前などに使います。</span></div>
+    </div>
     <div class="panel"><h3 style="margin-top:0">バックアップ</h3>
       <p>全データ (SQLite ファイル) をダウンロードします。復元するときは、サーバー停止後に <code>data/kaikei.db</code> をこのファイルで置き換えてください。</p>
       <a class="btn" href="/api/backup">バックアップをダウンロード</a>
     </div>
   </div>`;
+  bindSystemPanel();
   if (!hasClient) return;
 
   // この CSV をどの通帳 (補助科目) として取り込むか。

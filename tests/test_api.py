@@ -1222,3 +1222,107 @@ def test_fiscal_year_update_rejects_overlap(client):
     nxt = client.post(f"/api/clients/{cl['id']}/fiscal-years/next").json()
     r = client.put(f"/api/fiscal-years/{fy['id']}", json={"start_date": fy["start_date"], "end_date": nxt["start_date"]})
     assert r.status_code == 409
+
+
+class _FakeWinreg:
+    """テスト用の winreg (HKEY_CURRENT_USER だけを辞書で持つ)。"""
+    HKEY_CURRENT_USER = "HKCU"
+    KEY_SET_VALUE = 2
+    REG_SZ = 1
+
+    def __init__(self):
+        self.keys: dict[str, dict] = {}
+
+    class _Key:
+        def __init__(self, store, path, create):
+            if path not in store and not create:
+                raise FileNotFoundError(path)
+            self.values = store.setdefault(path, {})
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def OpenKey(self, root, path, *a):
+        return self._Key(self.keys, path, False)
+
+    def CreateKey(self, root, path):
+        return self._Key(self.keys, path, True)
+
+    def QueryValueEx(self, k, name):
+        if name not in k.values:
+            raise FileNotFoundError(name)
+        return k.values[name], 1
+
+    def SetValueEx(self, k, name, _r, _t, value):
+        k.values[name] = value
+
+    def DeleteValue(self, k, name):
+        if name not in k.values:
+            raise FileNotFoundError(name)
+        del k.values[name]
+
+
+@pytest.fixture()
+def fake_windows(monkeypatch, tmp_path):
+    from app import autostart
+    reg = _FakeWinreg()
+    monkeypatch.setattr(autostart, "supported", lambda: True)
+    monkeypatch.setattr(autostart, "_winreg", lambda: reg)
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    return reg, autostart
+
+
+def test_autostart_registers_run_key_and_removes_old_shortcut(fake_windows):
+    reg, autostart = fake_windows
+    lnk = autostart.legacy_shortcut()
+    lnk.parent.mkdir(parents=True)
+    lnk.write_text("old")
+    st = autostart.status()
+    assert not st["registered"] and st["legacy"] and "以前の方式" in st["problem"]
+
+    # 以前の方式 → 今の方式へ自動で切り替わる
+    assert autostart.migrate_legacy() is True
+    assert not lnk.exists()
+    st = autostart.status()
+    assert st["registered"] and st["enabled"] and st["open_browser"] and st["path_ok"] and not st["problem"]
+    cmd = reg.keys[autostart.RUN_KEY][autostart.VALUE_NAME]
+    assert str(autostart.RUN_PY) in cmd and "--background" in cmd and "--no-browser" not in cmd
+
+    # タスク マネージャーで無効にされていれば、そう表示し、設定し直すと有効に戻る
+    reg.keys.setdefault(autostart.APPROVED_KEY, {})[autostart.VALUE_NAME] = bytes([3] + [0] * 11)
+    st = autostart.status()
+    assert not st["enabled"] and "無効" in st["problem"]
+    st = autostart.enable(open_browser=False)
+    assert st["enabled"] and not st["open_browser"] and not st["problem"]
+
+    # 別のフォルダーが登録されていれば、そう表示する
+    reg.keys[autostart.RUN_KEY][autostart.VALUE_NAME] = r'"C:\Python\pythonw.exe" "D:\old\run.py" --background'
+    assert "別のフォルダー" in autostart.status()["problem"]
+
+    st = autostart.disable()
+    assert not st["registered"] and autostart.VALUE_NAME not in reg.keys[autostart.RUN_KEY]
+
+
+def test_system_autostart_api(client, fake_windows):
+    reg, autostart = fake_windows
+    assert client.get("/api/system/autostart").json()["registered"] is False
+    # 画面以外 (独自ヘッダー無し) からの変更・終了は拒否する
+    assert client.put("/api/system/autostart", json={"enabled": True}).status_code == 403
+    assert client.post("/api/system/shutdown").status_code == 403
+    h = {"X-Kaikei-Local": "1"}
+    r = client.put("/api/system/autostart", json={"enabled": True, "open_browser": True}, headers=h)
+    assert r.status_code == 200 and r.json()["registered"] and r.json()["open_browser"]
+    r = client.put("/api/system/autostart", json={"enabled": False}, headers=h)
+    assert r.json()["registered"] is False
+
+
+def test_autostart_reports_unsupported_outside_windows(client, monkeypatch):
+    from app import autostart
+    monkeypatch.setattr(autostart, "supported", lambda: False)
+    st = client.get("/api/system/autostart").json()
+    assert st["supported"] is False and "Windows" in st["problem"]
+    r = client.put("/api/system/autostart", json={"enabled": True}, headers={"X-Kaikei-Local": "1"})
+    assert r.status_code == 400

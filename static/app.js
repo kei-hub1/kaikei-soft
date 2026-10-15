@@ -22,7 +22,8 @@ const routes = {};   // name -> render(fn)
 
 // ---------------------------------------------------------------- API
 async function api(method, url, body, opts = {}) {
-  const init = { method, headers: {} };
+  // X-Kaikei-Local: 本ソフトの画面からの操作であることを示す (自動起動の設定・終了で確認する)
+  const init = { method, headers: { 'X-Kaikei-Local': '1' } };
   if (body instanceof FormData) {
     init.body = body;
   } else if (body !== undefined) {
@@ -415,3 +416,36 @@ function reportHeader(title, period) {
   return `<div class="report-title"><div><span class="client">${esc(c.code)} ${esc(c.name)}</span>　<b>${esc(title)}</b></div>
     <div class="period">${esc(period || '')}</div></div>`;
 }
+
+// ---------------------------------------------------------------- 画面の配色
+// 自動 (Windows の設定に合わせる) → ライト → ダーク の順に切り替える。
+const THEMES = [
+  { code: 'auto', label: '◐ 自動', title: 'Windows の設定 (ライト / ダーク) に合わせています' },
+  { code: 'light', label: '☀ ライト', title: 'ライト表示です' },
+  { code: 'dark', label: '☾ ダーク', title: 'ダーク表示です' },
+];
+function currentTheme() {
+  let t = 'auto';
+  try { t = localStorage.getItem('theme') || 'auto'; } catch (e) { /* 保存できない環境では自動 */ }
+  return THEMES.some(x => x.code === t) ? t : 'auto';
+}
+function applyTheme(code) {
+  if (code === 'auto') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = code;
+  try { if (code === 'auto') localStorage.removeItem('theme'); else localStorage.setItem('theme', code); } catch (e) { /* 無視 */ }
+  const btn = document.getElementById('theme-toggle');
+  if (btn) {
+    const t = THEMES.find(x => x.code === code);
+    btn.textContent = t.label;
+    btn.title = `${t.title}。クリックで切り替えます`;
+  }
+}
+(function initTheme() {
+  const btn = document.getElementById('theme-toggle');
+  if (!btn) return;
+  applyTheme(currentTheme());
+  btn.addEventListener('click', () => {
+    const i = THEMES.findIndex(x => x.code === currentTheme());
+    applyTheme(THEMES[(i + 1) % THEMES.length].code);
+  });
+})();

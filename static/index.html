@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>財務エントリ</title>
 <link rel="stylesheet" href="/static/style.css">
+<script>
+  // 画面の配色 (ライト / ダーク)。描画前に決めて、一瞬白く光るのを防ぐ。
+  try { var t = localStorage.getItem('theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 </head>
 <body>
 <div id="header">
@@ -14,6 +18,7 @@
   <span id="client-badges"></span>
   <span class="spacer"></span>
   <span class="hint" id="header-hint"></span>
+  <button id="theme-toggle" type="button" title="画面の配色を切り替えます"></button>
 </div>
 <div id="nav">
   <a href="#/entry" data-route="entry">仕訳入力</a>

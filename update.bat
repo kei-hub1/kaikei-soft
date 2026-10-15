@@ -20,9 +20,25 @@ echo   財務エントリ を最新版に更新します。
 echo   入力済みのデータ (data フォルダー) はそのまま残ります。
 echo.
 
-rem --- 動作中なら更新できない ---
+rem --- 動作中なら止める (更新が終わったら起動し直す) ---
+set "WASRUNNING="
+set "PY="
+py -3 -c "import sys" >nul 2>nul
+if not errorlevel 1 set "PY=py -3"
+if defined PY goto :check_running
+python -c "import sys" >nul 2>nul
+if not errorlevel 1 set "PY=python"
+
+:check_running
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $c=New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',8765); $c.Close(); exit 1 } catch { exit 0 }"
+if not errorlevel 1 goto :not_running
+if not defined PY goto :still_running
+echo   動いている 財務エントリ を一時的に終了します...
+%PY% run.py --stop
 if errorlevel 1 goto :still_running
+set "WASRUNNING=1"
+
+:not_running
 
 rem --- データのバックアップ ---
 if not exist "%APPDIR%\data\kaikei.db" goto :download
@@ -43,12 +59,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$o=@('app\passbook.py','
 rem --- 追加ライブラリの取り込み ---
 echo.
 echo   必要なライブラリを確認しています...
-set "PY="
-py -3 -c "import sys" >nul 2>nul
-if not errorlevel 1 set "PY=py -3"
-if defined PY goto :pip
-python -c "import sys" >nul 2>nul
-if not errorlevel 1 set "PY=python"
 if not defined PY goto :done
 
 :pip
@@ -56,6 +66,12 @@ if not defined PY goto :done
 if errorlevel 1 echo   ライブラリの更新に失敗しました。start.bat を実行すると再度試みます。
 
 :done
+if not defined WASRUNNING goto :done_msg
+echo.
+echo   財務エントリ を起動し直しています...
+%PY% run.py --start-background --no-browser
+
+:done_msg
 echo.
 echo   更新が完了しました。
 echo.
@@ -79,7 +95,8 @@ echo     ・このファイル (update.bat) 自体も新しくなります。自動で入れ替えます。
 
 :report
 echo.
-echo   start.bat をダブルクリックして起動してください。
+if defined WASRUNNING echo   財務エントリ は起動し直しました。ブラウザの画面を F5 キーで再読み込みしてください。
+if not defined WASRUNNING echo   start.bat をダブルクリックして起動してください。
 echo   次回の更新も、この update.bat をダブルクリックするだけです。
 echo.
 pause
@@ -105,10 +122,9 @@ exit /b 1
 echo.
 echo   財務エントリ が起動中です。先に終了してください。
 echo.
-echo     1. タスクバーにある黒いウィンドウを開いて閉じる
+echo     1. 「データ管理」画面の「財務エントリを終了」を押す
+echo        (黒いウィンドウで動いている場合は、そのウィンドウを閉じる)
 echo     2. このファイルをもう一度ダブルクリックする
-echo.
-echo   自動起動を設定している場合は、黒いウィンドウを閉じれば止まります。
 echo.
 pause
 exit /b 1
