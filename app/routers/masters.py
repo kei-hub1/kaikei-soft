@@ -6,8 +6,7 @@ from pydantic import BaseModel, Field
 
 from ..db import db, rows_to_dicts
 from ..master_data import (
-    CHART_CODES, CHARTS, GROUPS, GROUP_MAP, PROVISIONAL_PREFIX, ROLE_CODES, ROLES,
-    TAX_CLASSES, TAX_CLASS_MAP, TKC_TAX_DIVISIONS, chart_accounts,
+    CHART_CODES, CHARTS, GROUPS, GROUP_MAP, PROVISIONAL_PREFIX, ROLE_CODES, ROLES, chart_accounts,
 )
 
 router = APIRouter(prefix="/api", tags=["masters"])
@@ -16,18 +15,11 @@ router = APIRouter(prefix="/api", tags=["masters"])
 @router.get("/meta")
 def meta():
     return {
-        "tax_classes": TAX_CLASSES,
         "groups": GROUPS,
         "roles": ROLES,
         "charts": CHARTS,
-        "tkc_tax_divisions": TKC_TAX_DIVISIONS,
         "provisional_prefix": PROVISIONAL_PREFIX,
         "entity_types": [{"code": "corp", "name": "法人"}, {"code": "sole", "name": "個人"}],
-        "tax_methods": [
-            {"code": "inclusive", "name": "税込経理"},
-            {"code": "exclusive", "name": "税抜経理"},
-            {"code": "exempt", "name": "免税事業者"},
-        ],
     }
 
 
@@ -40,7 +32,6 @@ class AccountIn(BaseModel):
     name: str = Field(min_length=1)
     kana: str = ""
     grp: str
-    default_tax_class: str = "00"
     role: str = ""
     sort_order: int | None = None
     active: bool = True
@@ -69,8 +60,6 @@ def list_all_sub_accounts(client_id: int):
 def _validate_account(a: AccountIn) -> None:
     if a.grp not in GROUP_MAP:
         raise HTTPException(400, "表示区分が不正です")
-    if a.default_tax_class not in TAX_CLASS_MAP:
-        raise HTTPException(400, "消費税区分が不正です")
     if a.role not in ROLE_CODES:
         raise HTTPException(400, "科目の役割が不正です")
 
@@ -87,8 +76,8 @@ def create_account(client_id: int, a: AccountIn):
             r = conn.execute("SELECT MAX(sort_order) FROM accounts WHERE client_id=? AND grp=?", (client_id, a.grp)).fetchone()
             sort_order = (r[0] or 0) + 1
         cur = conn.execute(
-            "INSERT INTO accounts(client_id,code,name,kana,category,grp,default_tax_class,role,sort_order,active) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (client_id, a.code, a.name, a.kana, GROUP_MAP[a.grp], a.grp, a.default_tax_class, a.role, sort_order, int(a.active)),
+            "INSERT INTO accounts(client_id,code,name,kana,category,grp,role,sort_order,active) VALUES(?,?,?,?,?,?,?,?,?)",
+            (client_id, a.code, a.name, a.kana, GROUP_MAP[a.grp], a.grp, a.role, sort_order, int(a.active)),
         )
         return dict(conn.execute("SELECT * FROM accounts WHERE id=?", (cur.lastrowid,)).fetchone())
 
@@ -105,8 +94,8 @@ def update_account(account_id: int, a: AccountIn):
         if dup:
             raise HTTPException(409, "同じコードの科目が既に存在します")
         conn.execute(
-            "UPDATE accounts SET code=?,name=?,kana=?,category=?,grp=?,default_tax_class=?,role=?,sort_order=?,active=? WHERE id=?",
-            (a.code, a.name, a.kana, GROUP_MAP[a.grp], a.grp, a.default_tax_class, a.role,
+            "UPDATE accounts SET code=?,name=?,kana=?,category=?,grp=?,role=?,sort_order=?,active=? WHERE id=?",
+            (a.code, a.name, a.kana, GROUP_MAP[a.grp], a.grp, a.role,
              a.sort_order if a.sort_order is not None else row["sort_order"], int(a.active), account_id),
         )
         return dict(conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone())
@@ -175,15 +164,15 @@ def save_accounts_bulk(client_id: int, body: AccountsBulkIn):
         for order, a in enumerate(body.items):
             sort_order = a.sort_order if a.sort_order is not None else order * 10
             values = (a.code.strip(), a.name.strip(), a.kana.strip(), GROUP_MAP[a.grp], a.grp,
-                      a.default_tax_class, a.role, sort_order, int(a.active))
+                      a.role, sort_order, int(a.active))
             if a.id is None:
                 conn.execute(
-                    "INSERT INTO accounts(code,name,kana,category,grp,default_tax_class,role,sort_order,active,client_id) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?)", values + (client_id,))
+                    "INSERT INTO accounts(code,name,kana,category,grp,role,sort_order,active,client_id) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)", values + (client_id,))
                 created += 1
             else:
                 conn.execute(
-                    "UPDATE accounts SET code=?,name=?,kana=?,category=?,grp=?,default_tax_class=?,role=?,sort_order=?,active=? "
+                    "UPDATE accounts SET code=?,name=?,kana=?,category=?,grp=?,role=?,sort_order=?,active=? "
                     "WHERE id=? AND client_id=?", values + (a.id, client_id))
                 updated += 1
         return {"created": created, "updated": updated, "deleted": deleted}
@@ -207,18 +196,18 @@ def _apply_account_rows(conn, client_id: int, rows: list[dict], mode: str) -> di
     id_map: dict[str, int] = {}
     for a in rows:
         cur = dst.get(a["code"])
-        values = (a["name"], a["kana"], a["category"], a["grp"], a["default_tax_class"],
+        values = (a["name"], a["kana"], a["category"], a["grp"],
                   a["role"], a["sort_order"], int(a.get("active", 1)))
         if cur:
             conn.execute(
-                "UPDATE accounts SET name=?,kana=?,category=?,grp=?,default_tax_class=?,role=?,sort_order=?,active=? WHERE id=?",
+                "UPDATE accounts SET name=?,kana=?,category=?,grp=?,role=?,sort_order=?,active=? WHERE id=?",
                 values + (cur["id"],))
             id_map[a["code"]] = cur["id"]
             updated += 1
         else:
             c = conn.execute(
-                "INSERT INTO accounts(name,kana,category,grp,default_tax_class,role,sort_order,active,client_id,code) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)", values + (client_id, a["code"]))
+                "INSERT INTO accounts(name,kana,category,grp,role,sort_order,active,client_id,code) "
+                "VALUES(?,?,?,?,?,?,?,?,?)", values + (client_id, a["code"]))
             id_map[a["code"]] = c.lastrowid
             created += 1
 
@@ -580,7 +569,6 @@ class TemplateLineIn(BaseModel):
     credit_sub_id: int | None = None
     credit_dept_id: int | None = None
     amount: int = 0
-    tax_class: str = ""
     description: str = ""
 
 
@@ -616,9 +604,9 @@ def _save_template_lines(conn, tid: int, lines: list[TemplateLineIn]) -> None:
     conn.execute("DELETE FROM entry_template_lines WHERE template_id=?", (tid,))
     conn.executemany(
         "INSERT INTO entry_template_lines(template_id,line_no,debit_account_id,debit_sub_id,debit_dept_id,"
-        "credit_account_id,credit_sub_id,credit_dept_id,amount,tax_class,description) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "credit_account_id,credit_sub_id,credit_dept_id,amount,description) VALUES(?,?,?,?,?,?,?,?,?,?)",
         [(tid, i, l.debit_account_id, l.debit_sub_id, l.debit_dept_id,
-          l.credit_account_id, l.credit_sub_id, l.credit_dept_id, l.amount, l.tax_class, l.description.strip())
+          l.credit_account_id, l.credit_sub_id, l.credit_dept_id, l.amount, l.description.strip())
          for i, l in enumerate(lines, 1)])
 
 
@@ -673,7 +661,7 @@ def create_template_from_entry(client_id: int, entry_id: int, code: str = "", na
         _save_template_lines(conn, cur.lastrowid, [TemplateLineIn(
             debit_account_id=l["debit_account_id"], debit_sub_id=l["debit_sub_id"], debit_dept_id=l["debit_dept_id"],
             credit_account_id=l["credit_account_id"], credit_sub_id=l["credit_sub_id"], credit_dept_id=l["credit_dept_id"],
-            amount=l["amount"], tax_class=l["tax_class"], description=l["description"]) for l in lines])
+            amount=l["amount"], description=l["description"]) for l in lines])
         return _template_rows(conn, tid=cur.lastrowid)[0]
 
 

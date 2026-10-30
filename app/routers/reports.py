@@ -50,13 +50,6 @@ def monthly(fy_id: int):
         return posting.monthly_trend(conn, fy_id)
 
 
-@router.get("/fiscal-years/{fy_id}/reports/tax-summary")
-def tax_summary(fy_id: int, date_from: str | None = None, date_to: str | None = None):
-    with db() as conn:
-        fy = _fy(conn, fy_id)
-        return posting.tax_summary(conn, fy_id, date_from or fy["start_date"], date_to or fy["end_date"])
-
-
 @router.get("/fiscal-years/{fy_id}/reports/financial-statements")
 def financial_statements(fy_id: int, date_to: str | None = None):
     with db() as conn:

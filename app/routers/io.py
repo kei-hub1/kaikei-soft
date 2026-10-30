@@ -3,8 +3,9 @@
 仕訳 CSV 形式 (ヘッダ行あり, UTF-8 BOM 付き / Shift_JIS も取込可):
   日付, 伝票番号, 借方科目コード, 借方科目名, 借方補助コード, 借方補助名, 借方部門コード,
   貸方科目コード, 貸方科目名, 貸方補助コード, 貸方補助名, 貸方部門コード,
-  金額, 消費税区分, 消費税額, 摘要, 伝票メモ
+  金額, 摘要, 伝票メモ
 同じ 日付+伝票番号 の行は 1 伝票にまとめる。伝票番号が空の行は 1 行 1 伝票。
+消費税は扱わない。以前の CSV にある「消費税区分」「消費税額」の列は読み飛ばす。
 """
 from __future__ import annotations
 
@@ -18,8 +19,8 @@ from fastapi.responses import FileResponse, Response
 
 from ..db import db, get_db_path
 from ..master_data import (
-    GROUP_MAP, GROUPS, ROLE_NAME_BY_CODE, ROLES, TAX_CLASS_MAP, TAX_CLASSES, TKC_CORP_ONLY, TKC_SOLE_ONLY,
-    find_master_account, resolve_bool, resolve_role, resolve_tax_class,
+    GROUP_MAP, GROUPS, ROLE_NAME_BY_CODE, ROLES, TKC_CORP_ONLY, TKC_SOLE_ONLY,
+    find_master_account, resolve_bool, resolve_role,
 )
 from .clients import apply_fiscal_year_plan, fiscal_years_with_entries, plan_fiscal_years
 from .journals import EntryIn, LineIn, create_entries_bulk
@@ -28,7 +29,7 @@ router = APIRouter(prefix="/api", tags=["io"])
 
 CSV_HEADER = ["日付", "伝票番号", "借方科目コード", "借方科目名", "借方補助コード", "借方補助名", "借方部門コード",
               "貸方科目コード", "貸方科目名", "貸方補助コード", "貸方補助名", "貸方部門コード",
-              "金額", "消費税区分", "消費税額", "摘要", "伝票メモ"]
+              "金額", "摘要", "伝票メモ"]
 
 
 @router.get("/fiscal-years/{fy_id}/export/journal.csv")
@@ -39,7 +40,7 @@ def export_journal_csv(fy_id: int, date_from: str | None = None, date_to: str | 
             raise HTTPException(404, "会計期間が見つかりません")
         rows = conn.execute(
             """
-            SELECT e.entry_date, e.voucher_no, e.memo, l.amount, l.tax_class, l.tax_amount, l.description,
+            SELECT e.entry_date, e.voucher_no, e.memo, l.amount, l.description,
               da.code AS dc, da.name AS dn, ds.code AS dsc, ds.name AS dsn, dd.code AS ddc,
               ca.code AS cc, ca.name AS cn, cs.code AS csc, cs.name AS csn, cd.code AS cdc
             FROM journal_lines l JOIN journal_entries e ON e.id=l.entry_id
@@ -58,14 +59,14 @@ def export_journal_csv(fy_id: int, date_from: str | None = None, date_to: str | 
     for r in rows:
         w.writerow([r["entry_date"], r["voucher_no"], r["dc"] or "", r["dn"] or "", r["dsc"] or "", r["dsn"] or "", r["ddc"] or "",
                     r["cc"] or "", r["cn"] or "", r["csc"] or "", r["csn"] or "", r["cdc"] or "",
-                    r["amount"], r["tax_class"], r["tax_amount"], r["description"], r["memo"]])
+                    r["amount"], r["description"], r["memo"]])
     data = ("﻿" + buf.getvalue()).encode("utf-8")
     fname = f"journal_{fy['start_date']}_{fy['end_date']}.csv"
     return Response(content=data, media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
-ACCOUNT_CSV_HEADER = ["コード", "科目名", "かな", "表示区分", "既定の税区分", "役割", "並び順", "有効"]
+ACCOUNT_CSV_HEADER = ["コード", "科目名", "かな", "表示区分", "役割", "並び順", "有効"]
 
 
 @router.get("/clients/{client_id}/export/accounts.csv")
@@ -76,7 +77,7 @@ def export_accounts_csv(client_id: int):
     w = csv.writer(buf, lineterminator="\r\n")
     w.writerow(ACCOUNT_CSV_HEADER)
     for r in rows:
-        w.writerow([r["code"], r["name"], r["kana"], r["grp"], r["default_tax_class"],
+        w.writerow([r["code"], r["name"], r["kana"], r["grp"],
                     ROLE_NAME_BY_CODE.get(r["role"], r["role"]) if r["role"] else "",
                     r["sort_order"], 1 if r["active"] else 0])
     return Response(content=("﻿" + buf.getvalue()).encode("utf-8"), media_type="text/csv; charset=utf-8",
@@ -85,15 +86,14 @@ def export_accounts_csv(client_id: int):
 
 @router.get("/export/accounts-template.csv")
 def export_accounts_template_csv():
-    """空の科目表テンプレート。表示区分と税区分の選択肢を注記として付ける。"""
+    """空の科目表テンプレート。表示区分と役割の選択肢を注記として付ける。"""
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")
     w.writerow(ACCOUNT_CSV_HEADER)
-    w.writerow(["100", "現金", "げんきん", "流動資産", "00", "", "10", "1"])
-    w.writerow(["500", "売上高", "うりあげだか", "売上高", "11", "", "20", "1"])
+    w.writerow(["100", "現金", "げんきん", "流動資産", "", "10", "1"])
+    w.writerow(["500", "売上高", "うりあげだか", "売上高", "", "20", "1"])
     w.writerow([])
     w.writerow(["# 表示区分は次のいずれか:"] + [g["grp"] for g in GROUPS])
-    w.writerow(["# 既定の税区分:"] + [f'{t["code"]}={t["name"]}' for t in TAX_CLASSES])
     w.writerow(["# 役割 (空欄可):"] + [r["name"] for r in ROLES if r["code"]])
     w.writerow(["# 「#」で始まる行は読み飛ばされます。"])
     return Response(content=("﻿" + buf.getvalue()).encode("utf-8"), media_type="text/csv; charset=utf-8",
@@ -203,10 +203,6 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
         key = (d, vno) if vno else (d, f"__row{rowno}")
         dr = resolve_account(col(row, "借方科目コード"), col(row, "借方科目名"), rowno, "借方")
         cr = resolve_account(col(row, "貸方科目コード"), col(row, "貸方科目名"), rowno, "貸方")
-        tax_cls = col(row, "消費税区分") or "00"
-        if tax_cls not in TAX_CLASS_MAP:
-            raise HTTPException(400, f"{rowno} 行目: 消費税区分 '{tax_cls}' が不正です")
-        tax_amt_s = col(row, "消費税額")
         dr_sub = resolve_sub(dr, col(row, "借方補助コード"), col(row, "借方補助名"), rowno, "借方")
         cr_sub = resolve_sub(cr, col(row, "貸方補助コード"), col(row, "貸方補助名"), rowno, "貸方")
         # 指定された補助科目を、その科目の行で補助科目が空のものにだけ付ける。
@@ -223,8 +219,7 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
             debit_dept_id=depts.get(col(row, "借方部門コード")) if col(row, "借方部門コード") else None,
             credit_account_id=cr, credit_sub_id=cr_sub,
             credit_dept_id=depts.get(col(row, "貸方部門コード")) if col(row, "貸方部門コード") else None,
-            amount=_to_int(col(row, "金額")) or 0, tax_class=tax_cls,
-            tax_amount=_to_int(tax_amt_s, None) if tax_amt_s else None,
+            amount=_to_int(col(row, "金額")) or 0,
             description=col(row, "摘要"),
         )
         if key not in groups:
@@ -246,7 +241,7 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
         existing = _existing_fingerprints(conn, client_id, [e.entry_date for e in entries])
 
     # 日付・金額・摘要が一致する伝票が既にあれば取り込まない (二重計上の防止)。
-    # 科目・消費税区分は取り込んだ後で直すことがあるため、あえて比較しない。
+    # 科目は取り込んだ後で直すことがあるため、あえて比較しない。
     # 同じ内容が既に n 件あれば n 件までを飛ばし、それを超える分は取り込む。
     # 同じ日に同じ金額・同じ摘要の取引が本当に 2 回あることは珍しくないため。
     fresh: list[EntryIn] = []
@@ -338,7 +333,7 @@ async def check_import_accounts(client_id: int, file: UploadFile):
     for m in missing.values():
         sug = find_master_account(m["code"]) if m["code"] else None
         if sug is None and m["csv_name"]:
-            sug = {"code": m["code"], "name": m["csv_name"], "kana": "", "grp": "", "default_tax_class": "00", "role": ""}
+            sug = {"code": m["code"], "name": m["csv_name"], "kana": "", "grp": "", "role": ""}
         if sug and sug["role"] in used_roles:
             sug = dict(sug, role="")     # 同じ役割の科目が既にあれば、役割は付けない
         out.append({
@@ -427,7 +422,7 @@ async def fix_import_periods(client_id: int, file: UploadFile):
 def _fingerprint(entry_date: str, memo: str, lines: list[dict]) -> tuple:
     """重複判定に使うキー: 日付と、各行の金額・摘要・補助科目。
 
-    科目・部門・消費税区分・税額・伝票メモ・伝票番号は比較しない。
+    科目・部門・伝票メモ・伝票番号は比較しない。
     通帳から取り込んだ仕訳は後で科目を付け替えるのが前提で、付け替えた後に
     同じ期間を取り込み直しても重ならないようにするため。
 
@@ -513,16 +508,13 @@ async def import_accounts_csv(client_id: int, file: UploadFile, mode: str = "mer
         grp = col(row, "表示区分")
         if grp not in GROUP_MAP:
             raise HTTPException(400, f"{rowno} 行目: 表示区分 '{grp}' が不正です")
-        tax = resolve_tax_class(col(row, "既定の税区分") or col(row, "消費税区分"))
-        if tax is None:
-            raise HTTPException(400, f"{rowno} 行目: 税区分 '{col(row, '既定の税区分')}' が不正です")
         role = resolve_role(col(row, "役割"))
         if role is None:
             raise HTTPException(400, f"{rowno} 行目: 役割 '{col(row, '役割')}' が不正です")
         order_s = col(row, "並び順")
         parsed.append({
             "code": code, "name": name, "kana": col(row, "かな"), "grp": grp, "category": GROUP_MAP[grp],
-            "default_tax_class": tax, "role": role,
+            "role": role,
             "sort_order": _to_int(order_s) if order_s else len(parsed) * 10,
             "active": 1 if resolve_bool(col(row, "有効")) else 0,
         })
@@ -560,10 +552,6 @@ async def import_accounts_csv(client_id: int, file: UploadFile, mode: str = "mer
         final_roles = set(role_rows)
         if mode != "replace":
             final_roles |= {a["role"] for code, a in existing.items() if a["role"] and code not in seen}
-        if client["tax_method"] == "exclusive":
-            for r in ("tax_receivable", "tax_payable"):
-                if r not in final_roles:
-                    warnings.append(f"税抜経理ですが「{ROLE_NAME_BY_CODE[r]}」の役割を持つ科目がありません")
         need = "owner_capital" if client["entity_type"] == "sole" else "retained"
         if need not in final_roles:
             warnings.append(f"「{ROLE_NAME_BY_CODE[need]}」の役割を持つ科目がありません (繰越処理で必要です)")
@@ -583,15 +571,15 @@ async def import_accounts_csv(client_id: int, file: UploadFile, mode: str = "mer
             cur = existing.get(p["code"])
             if cur:
                 conn.execute(
-                    "UPDATE accounts SET name=?,kana=?,category=?,grp=?,default_tax_class=?,role=?,sort_order=?,active=? WHERE id=?",
-                    (p["name"], p["kana"], p["category"], p["grp"], p["default_tax_class"], p["role"],
+                    "UPDATE accounts SET name=?,kana=?,category=?,grp=?,role=?,sort_order=?,active=? WHERE id=?",
+                    (p["name"], p["kana"], p["category"], p["grp"], p["role"],
                      p["sort_order"], p["active"], cur["id"]))
             else:
                 conn.execute(
-                    "INSERT INTO accounts(client_id,code,name,kana,category,grp,default_tax_class,role,sort_order,active) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO accounts(client_id,code,name,kana,category,grp,role,sort_order,active) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
                     (client_id, p["code"], p["name"], p["kana"], p["category"], p["grp"],
-                     p["default_tax_class"], p["role"], p["sort_order"], p["active"]))
+                     p["role"], p["sort_order"], p["active"]))
         for a in to_delete:
             conn.execute("DELETE FROM opening_balances WHERE account_id=?", (a["id"],))
             conn.execute("DELETE FROM accounts WHERE id=?", (a["id"],))

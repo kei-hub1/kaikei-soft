@@ -1,4 +1,4 @@
-/* 帳票画面: 仕訳帳 / 総勘定元帳 / 残高試算表 / 月次推移表 / 消費税集計表 / 決算書 */
+/* 帳票画面: 仕訳帳 / 総勘定元帳 / 残高試算表 / 月次推移表 / 決算書 */
 'use strict';
 
 function periodToolbar(id, { from = S.fy.start_date, to = S.fy.end_date } = {}) {
@@ -54,7 +54,6 @@ function accountSelectHtml(id, { all = false, includeBlank = true } = {}) {
 
 // ---------------------------------------------------------------- 仕訳帳
 routes.journal = async function (main, params) {
-  const exempt = isExempt();
   main.innerHTML = `<h2>仕訳帳</h2>
   <div class="toolbar no-print">
     ${periodToolbar('j', { from: params.from, to: params.to })}
@@ -68,7 +67,7 @@ routes.journal = async function (main, params) {
   <div class="panel"><div id="j-title"></div>
   <div class="muted no-print" style="margin:2px 0 4px">行をクリックすると、その仕訳をこの画面のまま修正できます。修正画面から前後の仕訳へそのまま移れます。</div>
   <div class="scroll-x"><table class="grid compact sticky-head" id="j-table"><thead><tr>
-    <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th>${exempt ? '' : '<th>税区分</th><th>内消費税</th>'}<th>摘要</th>
+    <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th><th>摘要</th>
   </tr></thead><tbody></tbody></table></div></div>`;
   // 開いた直後からコードを打てるよう、科目欄は入力欄 (コード・かな・名称で検索)
   // 科目を変えたら摘要の絞り込みは外す。前の科目に合わせて入れた摘要が
@@ -98,7 +97,7 @@ routes.journal = async function (main, params) {
     const flush = () => {
       if (curDesc === null || !grpCount) return;
       rows.push(`<tr class="subtotal"><td colspan="6">${esc(curDesc || '(摘要なし)')} 小計 (${grpCount} 行)</td>
-        <td class="num">${fmt(grpDr)}</td><td colspan="${exempt ? 1 : 3}"></td></tr>`);
+        <td class="num">${fmt(grpDr)}</td><td></td></tr>`);
       grpDr = 0; grpCount = 0;
     };
     for (const e of r.entries) {
@@ -114,12 +113,11 @@ routes.journal = async function (main, params) {
           <td>${l.debit_code ? esc(l.debit_code + ' ' + l.debit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.debit_sub_name || '')}</td>
           <td>${l.credit_code ? esc(l.credit_code + ' ' + l.credit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.credit_sub_name || '')}</td>
           <td class="num">${fmt(l.amount)}</td>
-          ${exempt ? '' : `<td class="code">${l.tax_class !== '00' ? esc(taxShort(l.tax_class)) : ''}</td><td class="num">${l.tax_amount ? fmt(l.tax_amount) : ''}</td>`}
           <td>${esc(l.description)}${e.memo && i === 0 ? ` <span class="memo">[${esc(e.memo)}]</span>` : ''}</td></tr>`);
       });
     }
     flush();
-    rows.push(`<tr class="total"><td colspan="6">合計</td><td class="num">${fmt(total)}</td><td colspan="${exempt ? 1 : 3}"></td></tr>`);
+    rows.push(`<tr class="total"><td colspan="6">合計</td><td class="num">${fmt(total)}</td><td></td></tr>`);
     $('#j-table tbody').innerHTML = rows.join('');
   }
   $('#j-run').onclick = run;
@@ -194,7 +192,7 @@ routes.ledger = async function (main, params) {
       rows.push(`<tr class="clickable" data-id="${x.entry_id}">
         <td class="code">${fmtDate(x.date)}</td><td class="num">${x.voucher_no}</td>
         <td>${x.counter_code ? esc(x.counter_code + ' ' + x.counter_name) : '<span class="muted">諸口</span>'}</td><td>${esc(x.counter_sub)}</td>
-        <td>${esc(x.description)}${x.is_tax_split ? ' <span class="badge">消費税</span>' : ''}${x.sub_name && !subSel.value ? ` <span class="muted">(${esc(x.sub_name)})</span>` : ''}</td>
+        <td>${esc(x.description)}${x.sub_name && !subSel.value ? ` <span class="muted">(${esc(x.sub_name)})</span>` : ''}</td>
         ${fmtCell(x.debit)}${fmtCell(x.credit)}${byDesc ? '<td></td>' : fmtCell0(x.balance)}</tr>`);
     }
     if (byDesc && curDesc !== null) {
@@ -381,28 +379,6 @@ routes.monthly = async function (main) {
   $('#m-kind').onchange = draw;
   $('#m-csv').onclick = () => tableToCsv($('#m-table'), `月次推移_${S.client.code}.csv`);
   draw();
-};
-
-// ---------------------------------------------------------------- 消費税集計表
-routes.tax = async function (main, params) {
-  main.innerHTML = `<h2>消費税集計表</h2>
-  <div class="toolbar no-print">${periodToolbar('x', { from: params.from, to: params.to })}${printButton()} ${csvButton('x-csv')}</div>
-  <div class="panel"><div id="x-title"></div>
-  <table class="grid compact" id="x-table"><thead><tr><th>区分</th><th>名称</th><th>税率</th><th>件数</th><th>税込金額</th><th>本体金額</th><th>消費税額</th><th>控除対象税額</th></tr></thead><tbody></tbody></table>
-  <div id="x-summary" style="margin-top:10px"></div>
-  <p class="help">※ 内税方式で仕訳ごとに計算した消費税額の集計です (切捨て)。申告額は端数処理・積上げ計算等により異なる場合があります。</p></div>`;
-  async function run() {
-    const r = await GET(`/api/fiscal-years/${S.fy.id}/reports/tax-summary?date_from=${$('#x-from').value}&date_to=${$('#x-to').value}`);
-    $('#x-title').innerHTML = reportHeader('消費税集計表', `${fmtDate(r.date_from)} 〜 ${fmtDate(r.date_to)}`);
-    $('#x-table tbody').innerHTML = r.rows.map(x => `<tr><td class="code">${x.code}</td><td>${esc(x.name)}</td><td class="center">${x.rate ? x.rate + '%' : ''}</td>
-      <td class="num">${x.count}</td>${fmtCell0(x.amount)}${fmtCell0(x.net)}${fmtCell(x.tax)}${x.kind === 'purchase' ? fmtCell(x.deductible) : '<td></td>'}</tr>`).join('')
-      || '<tr><td colspan="8" class="empty">データがありません</td></tr>';
-    $('#x-summary').innerHTML = `<table class="grid compact" style="width:auto"><tr><th>売上に係る消費税 (仮受)</th>${fmtCell0(r.sales_tax)}</tr>
-      <tr><th>仕入に係る消費税 (仮払・控除対象)</th>${fmtCell0(r.purchase_tax)}</tr><tr class="total"><th>差引 納付(還付)税額の目安</th>${fmtCell0(r.net_tax)}</tr></table>`;
-  }
-  bindMonthSelect('x', run);
-  $('#x-csv').onclick = () => tableToCsv($('#x-table'), `消費税集計_${S.client.code}.csv`);
-  await run();
 };
 
 // ---------------------------------------------------------------- 決算書

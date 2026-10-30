@@ -9,7 +9,6 @@ function createEntryForm(root, opts = {}) {
   const inDialog = !!opts.inDialog;
   const onChanged = opts.onChanged || (async () => {});
   const hasDept = S.departments.some(d => d.active);
-  const exempt = isExempt();
   let editingId = null;      // 修正中の伝票 id
   let editingVno = null;
   let lastSaved = null;
@@ -37,14 +36,14 @@ function createEntryForm(root, opts = {}) {
         <col style="width:28px">
         <col><col style="width:11%">${hasDept ? '<col style="width:8%">' : ''}
         <col><col style="width:11%">${hasDept ? '<col style="width:8%">' : ''}
-        <col style="width:11%">${exempt ? '' : '<col style="width:9%"><col style="width:8%">'}
-        <col style="width:18%"><col style="width:34px">
+        <col style="width:11%">
+        <col style="width:30%"><col style="width:34px">
       </colgroup>
       <thead><tr>
         <th>#</th>
         <th class="dr">借方科目</th><th class="dr">借方補助</th>${hasDept ? '<th class="dr">部門</th>' : ''}
         <th class="cr">貸方科目</th><th class="cr">貸方補助</th>${hasDept ? '<th class="cr">部門</th>' : ''}
-        <th>金額</th>${exempt ? '' : '<th>税区分</th><th>内消費税</th>'}
+        <th>金額</th>
         <th>摘要</th><th></th>
       </tr></thead>
       <tbody id="e-lines"></tbody>
@@ -110,22 +109,6 @@ function createEntryForm(root, opts = {}) {
   function subNumberOne(accountId) { return subItems(accountId).find(s => /^0*1$/.test(String(s.code).trim())) || null; }
   function deptItems() { return S.departments.filter(d => d.active); }
 
-  function taxOptionsHtml() {
-    return S.meta.tax_classes.map(t => `<option value="${t.code}">${t.code} ${esc(t.short)}</option>`).join('');
-  }
-
-  function defaultTax(drId, crId) {
-    const dr = S.accountById[drId], cr = S.accountById[crId];
-    const d = dr && dr.default_tax_class !== '00' ? dr.default_tax_class : null;
-    const c = cr && cr.default_tax_class !== '00' ? cr.default_tax_class : null;
-    if (d && c) {
-      // 収益科目が貸方なら売上側、費用科目が借方なら仕入側を優先
-      if (cr.category === 'revenue') return c;
-      return d;
-    }
-    return d || c || '00';
-  }
-
   function addLine(data = {}, focus = false) {
     const tr = el(`<tr>
       <td class="rowno"></td>
@@ -136,14 +119,11 @@ function createEntryForm(root, opts = {}) {
       <td><input data-f="crsub" placeholder="補助"></td>
       ${hasDept ? '<td><input data-f="crdept" placeholder="部門"></td>' : ''}
       <td><input data-f="amount" class="num" inputmode="numeric"></td>
-      ${exempt ? '' : `<td><select data-f="tax">${taxOptionsHtml()}</select></td><td><input data-f="taxamt" class="num" inputmode="numeric"></td>`}
       <td><input data-f="desc" placeholder="摘要"></td>
       <td class="act"><button class="small" tabindex="-1" data-f="del" title="行削除">×</button></td>
     </tr>`);
     tbody.appendChild(tr);
     const f = (name) => tr.querySelector(`[data-f=${name}]`);
-    const st = { taxTouched: false, taxAmtTouched: false };
-    tr._state = st;
 
     // 補助科目はカーソルが入った時点で候補を出す。科目コードを打って Enter を押すと
     // ここに移ってくるので、そのまま上下キーと Enter で補助科目を選べる。
@@ -159,13 +139,13 @@ function createEntryForm(root, opts = {}) {
     const dr = makeCombo(f('dr'), {
       items: accountItems,
       emptyFallback: () => prevAccount(tr, 'dr'),
-      onChange: (it) => { drSub.clear(); updateSubState(f('drsub'), it); applyDefaultTax(); },
+      onChange: (it) => { drSub.clear(); updateSubState(f('drsub'), it); },
       onCommit: () => focusNext(f('dr')),
     });
     const cr = makeCombo(f('cr'), {
       items: accountItems,
       emptyFallback: () => prevAccount(tr, 'cr'),
-      onChange: (it) => { crSub.clear(); updateSubState(f('crsub'), it); applyDefaultTax(); },
+      onChange: (it) => { crSub.clear(); updateSubState(f('crsub'), it); },
       onCommit: () => focusNext(f('cr')),
     });
     let drDept = null, crDept = null;
@@ -180,28 +160,11 @@ function createEntryForm(root, opts = {}) {
       input.disabled = !has;
       input.placeholder = has ? '補助' : '';
     }
-    function applyDefaultTax() {
-      if (exempt || st.taxTouched) return;
-      f('tax').value = defaultTax(dr.id, cr.id);
-      recalcTax();
-    }
-    function recalcTax() {
-      if (exempt) return;
-      const t = S.taxById[f('tax').value];
-      const amt = parseAmount(f('amount').value);
-      const rate = t ? t.rate : 0;
-      if (!st.taxAmtTouched) {
-        const tax = rate > 0 ? Math.floor(Math.abs(amt) * rate / (100 + rate)) * Math.sign(amt || 1) : 0;
-        f('taxamt').value = rate > 0 && amt !== 0 ? fmt(tax) : '';
-      }
-      f('taxamt').disabled = rate === 0;
-      updateTotals();
-    }
 
     const amount = f('amount');
     amount.addEventListener('focus', () => selectAllOnFocus(amount));
     amount.addEventListener('input', () => { updateTotals(); });
-    amount.addEventListener('blur', () => { amount.value = amount.value.trim() ? fmt(parseAmount(amount.value)) : ''; recalcTax(); });
+    amount.addEventListener('blur', () => { amount.value = amount.value.trim() ? fmt(parseAmount(amount.value)) : ''; updateTotals(); });
     amount.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -210,23 +173,10 @@ function createEntryForm(root, opts = {}) {
           if (diff !== 0) amount.value = fmt(Math.abs(diff));
         }
         amount.value = amount.value.trim() ? fmt(parseAmount(amount.value)) : '';
-        recalcTax();
+        updateTotals();
         focusNext(amount);
       }
     });
-    if (!exempt) {
-      const tax = f('tax'), taxamt = f('taxamt');
-      tax.addEventListener('change', () => { st.taxTouched = true; st.taxAmtTouched = false; recalcTax(); });
-      tax.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); st.taxTouched = true; recalcTax(); focusNext(tax); }
-      });
-      taxamt.addEventListener('focus', () => selectAllOnFocus(taxamt));
-      taxamt.addEventListener('input', () => { st.taxAmtTouched = true; });
-      taxamt.addEventListener('blur', () => { taxamt.value = taxamt.value.trim() ? fmt(parseAmount(taxamt.value)) : ''; });
-      taxamt.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); taxamt.value = taxamt.value.trim() ? fmt(parseAmount(taxamt.value)) : ''; focusNext(taxamt); }
-      });
-    }
     const desc = f('desc');
     // 摘要はプリセットから選べるが、候補に無い文字列もそのまま入力できる
     const descSuggest = makeSuggest(desc, {
@@ -263,17 +213,6 @@ function createEntryForm(root, opts = {}) {
       if (data.credit_dept_id) crDept.set(data.credit_dept_id);
     }
     if (data.amount) amount.value = fmt(data.amount);
-    if (!exempt) {
-      if (data.tax_class) { f('tax').value = data.tax_class; st.taxTouched = true; }
-      else f('tax').value = defaultTax(dr.id, cr.id);
-      if (data.tax_amount !== undefined && data.tax_amount !== null && data.tax_class) {
-        const t = S.taxById[data.tax_class];
-        const auto = t && t.rate > 0 ? Math.floor(Math.abs(data.amount || 0) * t.rate / (100 + t.rate)) : 0;
-        st.taxAmtTouched = data.tax_amount !== auto;
-        f('taxamt').value = t && t.rate > 0 ? fmt(data.tax_amount) : '';
-        f('taxamt').disabled = !(t && t.rate > 0);
-      } else recalcTax();
-    }
     if (data.description) desc.value = data.description;
     renumber();
     updateTotals();
@@ -309,9 +248,7 @@ function createEntryForm(root, opts = {}) {
     tr.querySelector('[data-f=drsub]').disabled = true;
     tr.querySelector('[data-f=crsub]').disabled = true;
     tr.querySelector('[data-f=amount]').value = '';
-    if (!exempt) { tr.querySelector('[data-f=tax]').value = '00'; tr.querySelector('[data-f=taxamt]').value = ''; tr.querySelector('[data-f=taxamt]').disabled = true; }
     tr.querySelector('[data-f=desc]').value = '';
-    tr._state.taxTouched = false; tr._state.taxAmtTouched = false;
     updateTotals();
   }
   function renumber() { $$('tr', tbody).forEach((tr, i) => { tr.querySelector('.rowno').textContent = i + 1; }); }
@@ -320,15 +257,12 @@ function createEntryForm(root, opts = {}) {
     const c = tr._combos;
     const f = (n) => tr.querySelector(`[data-f=${n}]`);
     const amt = parseAmount(f('amount').value);
-    const taxCls = exempt ? '00' : f('tax').value;
-    const t = S.taxById[taxCls];
     const empty = !c.dr.id && !c.cr.id && amt === 0 && !f('desc').value.trim();
     return {
       empty,
       debit_account_id: c.dr.id, debit_sub_id: c.drSub.id, debit_dept_id: c.drDept ? c.drDept.id : null,
       credit_account_id: c.cr.id, credit_sub_id: c.crSub.id, credit_dept_id: c.crDept ? c.crDept.id : null,
-      amount: amt, tax_class: taxCls,
-      tax_amount: (!exempt && t && t.rate > 0) ? (tr._state.taxAmtTouched ? parseAmount(f('taxamt').value) : null) : 0,
+      amount: amt,
       description: f('desc').value.trim(),
     };
   }
@@ -404,7 +338,6 @@ function createEntryForm(root, opts = {}) {
     const list = fieldList();
     const i = list.indexOf(cur);
     let next = list[i + 1];
-    // 税区分の税率 0 の場合は税額欄をスキップ (disabled なのでリストに含まれない)
     if (next) next.focus();
     else { const rows = $$('tr', tbody); if (rows.length) addLine({}, true); }
   }
@@ -574,7 +507,7 @@ function createEntryForm(root, opts = {}) {
       async (d) => {
         await POST(`/api/clients/${S.client.id}/templates`, {
           code: d.code.trim(), name: d.name.trim(), memo: memoInput.value.trim(),
-          lines: lines.map(({ empty, tax_amount, ...l }) => l),
+          lines: lines.map(({ empty, ...l }) => l),
         });
         await loadTemplates();
         toast(`定型仕訳「${d.name.trim()}」に登録しました`);
@@ -623,9 +556,8 @@ function createEntryForm(root, opts = {}) {
             const ntr = addLine({
               debit_account_id: l.debit_account_id, debit_sub_id: l.debit_sub_id, debit_dept_id: l.debit_dept_id,
               credit_account_id: l.credit_account_id, credit_sub_id: l.credit_sub_id, credit_dept_id: l.credit_dept_id,
-              amount: l.amount || 0, tax_class: l.tax_class || undefined, description: l.description,
+              amount: l.amount || 0, description: l.description,
             });
-            if (!l.tax_class) ntr._state.taxTouched = false;
             if (!first) first = ntr;
           }
           renumber();
@@ -837,7 +769,6 @@ async function openEntryDialog(entryId, { onChanged, siblings } = {}) {
 
 // ---------------------------------------------------------------- 仕訳入力画面
 routes.entry = async function (main, params) {
-  const exempt = isExempt();
   let listMode = localStorage.getItem('entryListMode') || 'date';
 
   main.innerHTML = `<div id="entry-host"></div>
@@ -854,7 +785,7 @@ routes.entry = async function (main, params) {
       </div>
     </div>
     <div class="scroll-x"><table class="grid compact" id="e-list"><thead><tr>
-      <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th>${exempt ? '' : '<th>税</th>'}<th>摘要</th><th></th>
+      <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th><th>摘要</th><th></th>
     </tr></thead><tbody></tbody></table></div>
   </div>`;
 
@@ -880,7 +811,7 @@ routes.entry = async function (main, params) {
           <td class="code">${i === 0 ? fmtDate(e.entry_date) : ''}</td><td class="num">${i === 0 ? e.voucher_no : ''}</td>
           <td>${l.debit_code ? esc(l.debit_code + ' ' + l.debit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.debit_sub_name || '')}</td>
           <td>${l.credit_code ? esc(l.credit_code + ' ' + l.credit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.credit_sub_name || '')}</td>
-          <td class="num">${fmt(l.amount)}</td>${exempt ? '' : `<td class="code" title="${esc(taxName(l.tax_class))}">${l.tax_class !== '00' ? esc(taxShort(l.tax_class)) : ''}</td>`}
+          <td class="num">${fmt(l.amount)}</td>
           <td>${esc(l.description)}${e.memo && i === 0 ? ` <span class="memo">[${esc(e.memo)}]</span>` : ''}</td>
           <td class="center" style="white-space:nowrap">${i === 0 ? `<button class="small" data-edit="${e.id}">修正</button> <button class="small danger" data-del="${e.id}" data-vno="${e.voucher_no}">削除</button>` : ''}</td>
         </tr>`);

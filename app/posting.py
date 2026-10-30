@@ -2,8 +2,8 @@
 
 ポスティング: (account_id, sub_id, dept_id, side('D'/'C'), amount, counter_account_id, line)
 
-税抜経理 (exclusive) の顧問先では、課税取引の行を本体と仮払/仮受消費税に分離して転記する。
-税込経理 (inclusive) / 免税 (exempt) の場合は金額をそのまま転記する。
+消費税は扱わない。金額は入力されたまま (税込) で転記する。
+(消費税の申告が必要な顧問先は別のソフトで処理するため)
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from .master_data import GROUP_ORDER, normal_side, tax_class
+from .master_data import GROUP_ORDER, normal_side
 
 
 @dataclass
@@ -29,19 +29,9 @@ class Posting:
     entry_date: str
     voucher_no: int
     description: str
-    tax_class: str
-    is_tax_split: bool = False
 
 
-def _tax_accounts(conn: sqlite3.Connection, client_id: int) -> dict[str, int]:
-    rows = conn.execute(
-        "SELECT id, role FROM accounts WHERE client_id=? AND role IN ('tax_receivable','tax_payable')",
-        (client_id,),
-    ).fetchall()
-    return {r["role"]: r["id"] for r in rows}
-
-
-def line_to_postings(line: sqlite3.Row | dict, tax_method: str, tax_accounts: dict[str, int]) -> list[Posting]:
+def line_to_postings(line: sqlite3.Row | dict) -> list[Posting]:
     """1 仕訳行を転記データに変換する。"""
     l = dict(line)
     amount = int(l["amount"])
@@ -49,51 +39,19 @@ def line_to_postings(line: sqlite3.Row | dict, tax_method: str, tax_accounts: di
     cr = l.get("credit_account_id")
     base = dict(
         line_id=l["id"], entry_id=l["entry_id"], entry_date=l["entry_date"],
-        voucher_no=l["voucher_no"], description=l.get("description") or "", tax_class=l.get("tax_class") or "00",
+        voucher_no=l["voucher_no"], description=l.get("description") or "",
     )
     postings: list[Posting] = []
-
-    tc = tax_class(l.get("tax_class") or "00")
-    tax_amt = int(l.get("tax_amount") or 0)
-    split = tax_method == "exclusive" and tax_amt != 0 and tc["kind"] in ("sales", "purchase")
-
-    # 課税側 (本体を減額し消費税科目に転記する側) を決める
-    tax_side = None
-    tax_acct = None
-    if split:
-        if tc["kind"] == "sales":
-            tax_side = "C" if cr else "D"
-            tax_acct = tax_accounts.get("tax_payable")
-        else:
-            tax_side = "D" if dr else "C"
-            tax_acct = tax_accounts.get("tax_receivable")
-        if tax_acct is None:
-            split = False
-
     if dr:
-        amt = amount - tax_amt if (split and tax_side == "D") else amount
         postings.append(Posting(
             account_id=dr, sub_id=l.get("debit_sub_id") or 0, dept_id=l.get("debit_dept_id") or 0,
-            side="D", amount=amt, counter_account_id=cr, counter_sub_id=l.get("credit_sub_id") or 0, **base,
+            side="D", amount=amount, counter_account_id=cr, counter_sub_id=l.get("credit_sub_id") or 0, **base,
         ))
-        if split and tax_side == "D":
-            postings.append(Posting(
-                account_id=tax_acct, sub_id=0, dept_id=l.get("debit_dept_id") or 0,
-                side="D", amount=tax_amt, counter_account_id=cr, counter_sub_id=l.get("credit_sub_id") or 0,
-                is_tax_split=True, **base,
-            ))
     if cr:
-        amt = amount - tax_amt if (split and tax_side == "C") else amount
         postings.append(Posting(
             account_id=cr, sub_id=l.get("credit_sub_id") or 0, dept_id=l.get("credit_dept_id") or 0,
-            side="C", amount=amt, counter_account_id=dr, counter_sub_id=l.get("debit_sub_id") or 0, **base,
+            side="C", amount=amount, counter_account_id=dr, counter_sub_id=l.get("debit_sub_id") or 0, **base,
         ))
-        if split and tax_side == "C":
-            postings.append(Posting(
-                account_id=tax_acct, sub_id=0, dept_id=l.get("credit_dept_id") or 0,
-                side="C", amount=tax_amt, counter_account_id=dr, counter_sub_id=l.get("debit_sub_id") or 0,
-                is_tax_split=True, **base,
-            ))
     return postings
 
 
@@ -110,8 +68,6 @@ def fetch_postings(conn: sqlite3.Connection, fiscal_year_id: int, date_from: str
     fy = conn.execute("SELECT * FROM fiscal_years WHERE id=?", (fiscal_year_id,)).fetchone()
     if fy is None:
         return []
-    client = conn.execute("SELECT * FROM clients WHERE id=?", (fy["client_id"],)).fetchone()
-    tax_accounts = _tax_accounts(conn, client["id"])
     extra = ""
     params: list = [fiscal_year_id]
     if date_from:
@@ -123,7 +79,7 @@ def fetch_postings(conn: sqlite3.Connection, fiscal_year_id: int, date_from: str
     rows = conn.execute(LINE_SQL.format(extra=extra), params).fetchall()
     result: list[Posting] = []
     for r in rows:
-        result.extend(line_to_postings(r, client["tax_method"], tax_accounts))
+        result.extend(line_to_postings(r))
     return result
 
 
@@ -321,10 +277,9 @@ def ledger(conn: sqlite3.Connection, fiscal_year_id: int, account_id: int, date_
             "counter_code": ca["code"] if ca else "", "counter_name": ca["name"] if ca else "諸口",
             "counter_sub": cs["name"] if cs else "",
             "sub_name": s["name"] if s else "",
-            "description": p.description, "tax_class": p.tax_class,
+            "description": p.description,
             "debit": p.amount if p.side == "D" else 0, "credit": p.amount if p.side == "C" else 0,
             "balance": bal if ns == "D" else -bal,
-            "is_tax_split": p.is_tax_split,
         })
     groups = []
     if sort == "description":
@@ -443,34 +398,6 @@ def monthly_trend(conn: sqlite3.Connection, fiscal_year_id: int) -> dict:
             "closing": sign * d["opening"] + sum(vals),
         })
     return {"fiscal_year": dict(fy), "months": months, "rows": rows}
-
-
-def tax_summary(conn: sqlite3.Connection, fiscal_year_id: int, date_from: str, date_to: str) -> dict:
-    """消費税集計表: 税区分ごとの取引金額(税込)、本体、消費税額。"""
-    from .master_data import TAX_CLASSES
-    rows = conn.execute(LINE_SQL.format(extra=" AND e.entry_date >= ? AND e.entry_date <= ?"),
-                        (fiscal_year_id, date_from, date_to)).fetchall()
-    agg: dict[str, dict] = {t["code"]: {"amount": 0, "tax": 0, "count": 0} for t in TAX_CLASSES}
-    for r in rows:
-        a = agg.setdefault(r["tax_class"], {"amount": 0, "tax": 0, "count": 0})
-        a["amount"] += r["amount"]
-        a["tax"] += r["tax_amount"]
-        a["count"] += 1
-    out = []
-    sales_tax = purchase_tax = 0
-    for t in TAX_CLASSES:
-        a = agg[t["code"]]
-        if a["count"] == 0:
-            continue
-        deductible = a["tax"] * t["deduction"] // 100 if t["kind"] == "purchase" else 0
-        out.append({**t, "amount": a["amount"], "net": a["amount"] - a["tax"], "tax": a["tax"],
-                    "deductible": deductible, "count": a["count"]})
-        if t["kind"] == "sales":
-            sales_tax += a["tax"]
-        elif t["kind"] == "purchase":
-            purchase_tax += deductible
-    return {"rows": out, "sales_tax": sales_tax, "purchase_tax": purchase_tax, "net_tax": sales_tax - purchase_tax,
-            "date_from": date_from, "date_to": date_to}
 
 
 def financial_statements(conn: sqlite3.Connection, fiscal_year_id: int, date_to: str | None = None) -> dict:

@@ -18,7 +18,6 @@ class ClientIn(BaseModel):
     name: str = Field(min_length=1)
     kana: str = ""
     entity_type: str = "corp"
-    tax_method: str = "inclusive"
     fiscal_start_month: int = Field(default=4, ge=1, le=12)
     note: str = ""
     # 新規作成時のみ有効。どの科目表を複写するか (tkc / standard / none)。
@@ -34,8 +33,6 @@ class FiscalYearIn(BaseModel):
 def _validate_client(c: ClientIn) -> None:
     if c.entity_type not in ("corp", "sole"):
         raise HTTPException(400, "entity_type は corp / sole のいずれか")
-    if c.tax_method not in ("inclusive", "exclusive", "exempt"):
-        raise HTTPException(400, "tax_method は inclusive / exclusive / exempt のいずれか")
     if c.chart not in CHART_CODES:
         raise HTTPException(400, "科目表の指定が不正です")
 
@@ -169,14 +166,14 @@ def create_client(c: ClientIn):
         if conn.execute("SELECT 1 FROM clients WHERE code=?", (c.code,)).fetchone():
             raise HTTPException(409, "同じコードの顧問先が既に存在します")
         cur = conn.execute(
-            "INSERT INTO clients(code,name,kana,entity_type,tax_method,fiscal_start_month,note,created_at) VALUES(?,?,?,?,?,?,?,?)",
-            (c.code, c.name, c.kana, c.entity_type, c.tax_method, c.fiscal_start_month, c.note, now_iso()),
+            "INSERT INTO clients(code,name,kana,entity_type,fiscal_start_month,note,created_at) VALUES(?,?,?,?,?,?,?)",
+            (c.code, c.name, c.kana, c.entity_type, c.fiscal_start_month, c.note, now_iso()),
         )
         cid = cur.lastrowid
         # 選択された科目表を複写する
         conn.executemany(
-            "INSERT INTO accounts(client_id,code,name,kana,category,grp,default_tax_class,role,sort_order) VALUES(?,?,?,?,?,?,?,?,?)",
-            [(cid, a["code"], a["name"], a["kana"], a["category"], a["grp"], a["default_tax_class"], a["role"], a["sort_order"])
+            "INSERT INTO accounts(client_id,code,name,kana,category,grp,role,sort_order) VALUES(?,?,?,?,?,?,?,?)",
+            [(cid, a["code"], a["name"], a["kana"], a["category"], a["grp"], a["role"], a["sort_order"])
              for a in chart_accounts(c.chart, c.entity_type)],
         )
         # 初期会計期間
@@ -206,8 +203,8 @@ def update_client(client_id: int, c: ClientIn):
             raise HTTPException(409, "同じコードの顧問先が既に存在します")
         before = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
         conn.execute(
-            "UPDATE clients SET code=?,name=?,kana=?,entity_type=?,tax_method=?,fiscal_start_month=?,note=? WHERE id=?",
-            (c.code, c.name, c.kana, c.entity_type, c.tax_method, c.fiscal_start_month, c.note, client_id),
+            "UPDATE clients SET code=?,name=?,kana=?,entity_type=?,fiscal_start_month=?,note=? WHERE id=?",
+            (c.code, c.name, c.kana, c.entity_type, c.fiscal_start_month, c.note, client_id),
         )
         out = dict(conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone())
         out["fiscal_year_adjusted"] = None

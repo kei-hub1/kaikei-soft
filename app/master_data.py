@@ -1,75 +1,9 @@
-"""標準勘定科目表・消費税区分などの固定マスタ。"""
+"""標準勘定科目表などの固定マスタ。
+
+消費税は扱わない (申告が必要な顧問先は別のソフトで処理する)。
+科目表のデータに残っている税区分の列は使っていない。
+"""
 from __future__ import annotations
-
-# ---------------------------------------------------------------------------
-# 消費税区分
-#   kind: none / sales / sales_exempt / sales_export / purchase / purchase_exempt / out_of_scope
-#   rate: 税率(%)
-#   deduction: 仕入税額控除割合(%)  (インボイス経過措置 80% / 50%)
-# ---------------------------------------------------------------------------
-#   tkc:  TKC 会計システムの課税区分コードとの対応 (参照用の表示のみ)。
-#         仕入れ側は用途区分 (課税売上対応 / 非課税売上対応 / 共通) で
-#         TKC のコードが分かれるため、候補を併記している。
-TAX_CLASSES: list[dict] = [
-    {"code": "00", "name": "対象外", "short": "対象外", "kind": "none", "rate": 0, "deduction": 0, "tkc": "0"},
-    {"code": "11", "name": "課税売上 10%", "short": "課売10", "kind": "sales", "rate": 10, "deduction": 0, "tkc": "1"},
-    {"code": "12", "name": "課税売上 8%(軽減)", "short": "課売8軽", "kind": "sales", "rate": 8, "deduction": 0, "tkc": "1"},
-    {"code": "13", "name": "非課税売上", "short": "非課売", "kind": "sales_exempt", "rate": 0, "deduction": 0, "tkc": "3"},
-    {"code": "14", "name": "免税売上(輸出等)", "short": "免税売", "kind": "sales_export", "rate": 0, "deduction": 0, "tkc": "2"},
-    {"code": "21", "name": "課税仕入 10%", "short": "課仕10", "kind": "purchase", "rate": 10, "deduction": 100, "tkc": "5 / 6 / 7"},
-    {"code": "22", "name": "課税仕入 8%(軽減)", "short": "課仕8軽", "kind": "purchase", "rate": 8, "deduction": 100, "tkc": "5 / 6 / 7"},
-    {"code": "23", "name": "非課税仕入", "short": "非課仕", "kind": "purchase_exempt", "rate": 0, "deduction": 0, "tkc": "8"},
-    {"code": "24", "name": "課税仕入 10%(80%控除)", "short": "課仕10-80", "kind": "purchase", "rate": 10, "deduction": 80, "tkc": "52 / 62 / 72"},
-    {"code": "25", "name": "課税仕入 8%軽(80%控除)", "short": "課仕8-80", "kind": "purchase", "rate": 8, "deduction": 80, "tkc": "52 / 62 / 72"},
-    {"code": "26", "name": "課税仕入 10%(50%控除)", "short": "課仕10-50", "kind": "purchase", "rate": 10, "deduction": 50, "tkc": "52 / 62 / 72"},
-    {"code": "27", "name": "課税仕入 8%軽(50%控除)", "short": "課仕8-50", "kind": "purchase", "rate": 8, "deduction": 50, "tkc": "52 / 62 / 72"},
-    {"code": "30", "name": "不課税", "short": "不課税", "kind": "out_of_scope", "rate": 0, "deduction": 0, "tkc": "0"},
-]
-
-# TKC 会計システムの課税区分コード (docs/tkc_codes.md 2.)。参照用。
-# 本ソフトは上の TAX_CLASSES で消費税を計算しており、用途区分 (課税売上対応 /
-# 非課税売上対応 / 共通) による個別対応方式の控除計算には未対応。
-TKC_TAX_DIVISIONS: list[dict] = [
-    {"code": "1", "name": "課税売上げ"},
-    {"code": "11", "name": "課税売上げに係る対価の返還"},
-    {"code": "2", "name": "輸出売上げ（課税品の輸出等）"},
-    {"code": "3", "name": "非課税売上げ"},
-    {"code": "4", "name": "有価証券等の譲渡"},
-    {"code": "5", "name": "課税売上げにのみ要する課税仕入れ"},
-    {"code": "51", "name": "課税売上げにのみ要する課税仕入れに係る対価の返還"},
-    {"code": "52", "name": "免税事業者等からの課税仕入れ（課税売上げ）"},
-    {"code": "53", "name": "免税事業者等からの課税仕入れ（課税売上げ）に係る対価の返還"},
-    {"code": "6", "name": "非課税売上げにのみ要する課税仕入れ"},
-    {"code": "61", "name": "非課税売上げにのみ要する課税仕入れに係る対価の返還"},
-    {"code": "62", "name": "免税事業者等からの課税仕入れ（非課税売上げ）"},
-    {"code": "63", "name": "免税事業者等からの課税仕入れ（非課税売上げ）に係る対価の返還"},
-    {"code": "7", "name": "課税・非課税売上げに共通する課税仕入れ"},
-    {"code": "71", "name": "課税・非課税売上げに共通する課税仕入れに係る対価の返還"},
-    {"code": "72", "name": "免税事業者等からの課税仕入れ（売上げ共通）"},
-    {"code": "73", "name": "免税事業者等からの課税仕入れ（売上げ共通）に係る対価の返還"},
-    {"code": "8", "name": "非課税仕入れ・非課税仕入れに係る対価の返還"},
-    {"code": "9", "name": "課税区分が未確定の取引等"},
-    {"code": "0", "name": "不課税取引（税外取引）"},
-]
-TAX_CLASS_MAP: dict[str, dict] = {t["code"]: t for t in TAX_CLASSES}
-
-
-def tax_class(code: str) -> dict:
-    return TAX_CLASS_MAP.get(code or "00", TAX_CLASS_MAP["00"])
-
-
-def resolve_tax_class(value: str) -> str | None:
-    """CSV 取込用: コード / 正式名称 / 略称 のいずれからでも税区分コードを引く。"""
-    v = (value or "").strip()
-    if v == "":
-        return "00"
-    if v in TAX_CLASS_MAP:
-        return v
-    for t in TAX_CLASSES:
-        if v in (t["name"], t["short"]):
-            return t["code"]
-    return None
-
 
 # ---------------------------------------------------------------------------
 # 科目の特殊な役割
@@ -78,8 +12,6 @@ def resolve_tax_class(value: str) -> str | None:
 # ---------------------------------------------------------------------------
 ROLES: list[dict] = [
     {"code": "", "name": "(なし)", "note": ""},
-    {"code": "tax_receivable", "name": "仮払消費税", "note": "税抜経理で課税仕入の消費税を転記する先"},
-    {"code": "tax_payable", "name": "仮受消費税", "note": "税抜経理で課税売上の消費税を転記する先"},
     {"code": "retained", "name": "繰越利益剰余金", "note": "法人: 繰越処理で当期純利益を加算する先"},
     {"code": "owner_capital", "name": "元入金", "note": "個人: 繰越処理で所得と事業主勘定を加算する先"},
     {"code": "owner_drawing", "name": "事業主貸", "note": "個人: 繰越処理で元入金へ振り替える"},
@@ -95,6 +27,9 @@ def resolve_role(value: str) -> str | None:
     v = (value or "").strip()
     if v in ("", "(なし)", "なし", "-"):
         return ""
+    # 消費税を扱っていた頃の役割。今は使わないので、以前の CSV にあっても役割なしとして読む
+    if v in ("tax_receivable", "tax_payable", "仮払消費税", "仮受消費税"):
+        return ""
     if v in ROLE_CODES:
         return v
     for r in ROLES:
@@ -108,19 +43,6 @@ def resolve_bool(value: str, default: bool = True) -> bool:
     if v == "":
         return default
     return v not in ("0", "false", "no", "n", "×", "x", "無効", "off")
-
-
-def is_taxable(code: str) -> bool:
-    t = tax_class(code)
-    return t["kind"] in ("sales", "purchase") and t["rate"] > 0
-
-
-def calc_tax_inclusive(amount: int, rate: int) -> int:
-    """税込金額から内税額を計算(切捨て)。"""
-    if rate <= 0 or amount == 0:
-        return 0
-    sign = 1 if amount >= 0 else -1
-    return sign * (abs(amount) * rate // (100 + rate))
 
 
 # ---------------------------------------------------------------------------
@@ -156,9 +78,9 @@ def normal_side(category: str) -> str:
 
 # ---------------------------------------------------------------------------
 # 標準勘定科目表  (code, name, kana, grp, default_tax_class, role)
+#   default_tax_class と、役割 tax_receivable / tax_payable (仮払・仮受消費税) は
+#   消費税を扱っていた頃の名残で、今は使わない (科目表を作るときに無視する)。
 #   role: 特別な意味を持つ科目
-#     tax_receivable  仮払消費税
-#     tax_payable     仮受消費税
 #     retained        繰越利益剰余金 (法人)  … 繰越時に当期純利益を加算
 #     owner_capital   元入金 (個人)         … 繰越時に所得・事業主勘定を加算
 #     owner_drawing   事業主貸 (個人)
@@ -453,13 +375,13 @@ CHART_CODES = {c["code"] for c in CHARTS}
 
 def _build(rows: list[tuple], skip: set[str]) -> list[dict]:
     result = []
-    for i, (code, name, kana, grp, tax, role) in enumerate(rows):
+    for i, (code, name, kana, grp, _tax, role) in enumerate(rows):
         if code in skip:
             continue
         result.append({
             "code": code, "name": name, "kana": kana,
             "category": GROUP_MAP[grp], "grp": grp,
-            "default_tax_class": tax, "role": role, "sort_order": i * 10,
+            "role": role if role in ROLE_CODES else "", "sort_order": i * 10,
         })
     return result
 
@@ -484,10 +406,10 @@ def tkc_accounts_for(entity_type: str) -> list[dict]:
 def find_master_account(code: str) -> dict | None:
     """TKC・汎用の科目表から、コードが一致する科目を探す。無ければ None。"""
     for table in (TKC_ACCOUNTS, STANDARD_ACCOUNTS):
-        for c, name, kana, grp, tax, role in table:
+        for c, name, kana, grp, _tax, role in table:
             if c == code:
                 return {"code": c, "name": name, "kana": kana, "grp": grp,
-                        "default_tax_class": tax, "role": role}
+                        "role": role if role in ROLE_CODES else ""}
     return None
 
 

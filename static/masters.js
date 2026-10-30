@@ -84,7 +84,7 @@ function askMissingAccounts({ missing, entity_type }) {
           (tr.querySelector('[data-f=code]') || tr.querySelector(grp ? '[data-f=name]' : '[data-f=grp]')).focus();
           return;
         }
-        items.push({ code, name, kana: s.kana || '', grp, default_tax_class: s.default_tax_class || '00', role: s.role || '', active: true });
+        items.push({ code, name, kana: s.kana || '', grp, role: s.role || '', active: true });
       }
       try {
         for (const a of items) await POST(`/api/clients/${S.client.id}/accounts`, a);
@@ -281,7 +281,7 @@ routes.accounts = async function (main) {
   function snapshot() {
     return S.accounts.map(a => ({
       id: a.id, code: a.code, name: a.name, kana: a.kana, grp: a.grp,
-      default_tax_class: a.default_tax_class, role: a.role, sort_order: a.sort_order,
+      role: a.role, sort_order: a.sort_order,
       active: !!a.active, sub_count: (S.subsByAccount[a.id] || []).length,
     }));
   }
@@ -309,13 +309,12 @@ routes.accounts = async function (main) {
     </div>
     <div class="scroll-x"><table class="grid compact sticky-head" id="a-table"><thead><tr>
       <th style="width:90px">コード</th><th style="width:200px">科目名</th><th style="width:150px">かな</th>
-      <th style="width:170px">表示区分</th><th style="width:160px">既定の税区分</th><th style="width:150px">役割</th>
+      <th style="width:170px">表示区分</th><th style="width:150px">役割</th>
       <th style="width:70px">並び順</th><th style="width:60px">有効</th><th style="width:110px">補助科目</th><th style="width:50px"></th>
     </tr></thead><tbody></tbody></table></div>
   </div>`;
 
   const grpOptions = S.meta.groups.map(g => `<option value="${esc(g.grp)}">${esc(g.grp)}</option>`).join('');
-  const taxOptions = S.meta.tax_classes.map(t => `<option value="${t.code}">${t.code} ${esc(t.name)}</option>`).join('');
   const roleOptions = (S.meta.roles || [{ code: '', name: '(なし)' }])
     .map(r => `<option value="${r.code}">${esc(r.name)}</option>`).join('');
 
@@ -353,7 +352,6 @@ routes.accounts = async function (main) {
         <td><input data-f="name" value="${esc(r.name)}"></td>
         <td><input data-f="kana" value="${esc(r.kana || '')}"></td>
         <td><select data-f="grp">${grpOptions}</select></td>
-        <td><select data-f="default_tax_class">${taxOptions}</select></td>
         <td><select data-f="role">${roleOptions}</select></td>
         <td><input class="num" data-f="sort_order" value="${r.sort_order}"></td>
         <td class="center"><input type="checkbox" data-f="active" ${r.active ? 'checked' : ''}></td>
@@ -362,12 +360,11 @@ routes.accounts = async function (main) {
         <td class="center"><button class="small danger" data-del="${i}" title="この行を削除">×</button></td>
       </tr>`);
     }
-    $('#a-table tbody').innerHTML = out.join('') || '<tr><td colspan="10" class="empty">該当する科目がありません</td></tr>';
+    $('#a-table tbody').innerHTML = out.join('') || '<tr><td colspan="9" class="empty">該当する科目がありません</td></tr>';
     // select の初期値は value 属性では指定できないので個別に設定する
     for (const tr of $$('#a-table tbody tr[data-i]')) {
       const r = rows[Number(tr.dataset.i)];
       tr.querySelector('[data-f=grp]').value = r.grp;
-      tr.querySelector('[data-f=default_tax_class]').value = r.default_tax_class;
       tr.querySelector('[data-f=role]').value = r.role || '';
     }
     $('#a-status').innerHTML = dirty ? '<span class="badge warn">未保存の変更があります</span>'
@@ -381,9 +378,6 @@ routes.accounts = async function (main) {
     const prov = rows.filter(r => String(r.code).startsWith(prefix));
     const roles = new Set(rows.filter(r => r.active).map(r => r.role).filter(Boolean));
     const missing = [];
-    if (S.client.tax_method === 'exclusive') {
-      for (const c of ['tax_receivable', 'tax_payable']) if (!roles.has(c)) missing.push(c);
-    }
     missing.push(...(S.client.entity_type === 'sole' ? ['owner_capital'] : ['retained']).filter(c => !roles.has(c)));
     const roleName = (c) => ((S.meta.roles || []).find(r => r.code === c) || {}).name || c;
 
@@ -440,7 +434,7 @@ routes.accounts = async function (main) {
   $('#a-add').onclick = () => {
     const grp = $('#a-grp').value || '販売費及び一般管理費';
     const max = rows.filter(r => r.grp === grp).reduce((m, r) => Math.max(m, Number(r.sort_order) || 0), 0);
-    rows.push({ id: null, code: '', name: '', kana: '', grp, default_tax_class: '00', role: '', sort_order: max + 1, active: true, sub_count: 0 });
+    rows.push({ id: null, code: '', name: '', kana: '', grp, role: '', sort_order: max + 1, active: true, sub_count: 0 });
     markDirty();
     draw();
     const trs = $$('#a-table tbody tr[data-i]');
@@ -468,7 +462,7 @@ routes.accounts = async function (main) {
       const body = {
         items: rows.map(r => ({
           id: r.id, code: String(r.code).trim(), name: String(r.name).trim(), kana: String(r.kana || '').trim(),
-          grp: r.grp, default_tax_class: r.default_tax_class, role: r.role || '',
+          grp: r.grp, role: r.role || '',
           sort_order: Number(r.sort_order) || 0, active: !!r.active,
         })),
         delete_ids: deleted,
@@ -590,7 +584,7 @@ routes.accounts = async function (main) {
   // ---------------------------------------------------------------- CSV 取込
   $('#a-import').onclick = () => {
     modal(`<h3>勘定科目 CSV の取込</h3>
-      <p class="muted" style="margin-top:0">列: コード, 科目名, かな, 表示区分, 既定の税区分, 役割, 並び順, 有効<br>
+      <p class="muted" style="margin-top:0">列: コード, 科目名, かな, 表示区分, 役割, 並び順, 有効<br>
       「コード」で既存の科目と照合します。文字コードは UTF-8 / Shift_JIS のどちらでも構いません。</p>
       <div class="form">
         <label class="field wide"><span>CSV ファイル</span><input type="file" id="ai-file" accept=".csv,text/csv"></label>
@@ -923,7 +917,7 @@ routes.templates = async function (main) {
     <span class="muted">仕訳入力画面で <kbd>F2</kbd> を押すと呼び出せます。入力済みの伝票は、仕訳入力画面の「定型登録」からそのまま追加できます。</span></div>
   <div class="panel"><div class="scroll-x"><table class="grid compact" id="p-table"><thead><tr>
     <th style="width:70px">コード</th><th style="width:180px">名称</th><th>借方</th><th>貸方</th>
-    <th style="width:100px">金額</th><th style="width:110px">税区分</th><th>摘要</th><th style="width:130px"></th>
+    <th style="width:100px">金額</th><th>摘要</th><th style="width:130px"></th>
   </tr></thead><tbody></tbody></table></div></div>`;
 
   /** 定型仕訳の編集ダイアログ。連続登録に対応する。 */
@@ -943,7 +937,7 @@ routes.templates = async function (main) {
       <table class="entry-grid" id="p-lines"><thead><tr>
         <th style="width:26px">#</th><th class="dr">借方科目</th><th class="dr" style="width:12%">借方補助</th>
         <th class="cr">貸方科目</th><th class="cr" style="width:12%">貸方補助</th>
-        <th style="width:12%">金額</th><th style="width:11%">税区分</th><th style="width:20%">摘要</th><th style="width:30px"></th>
+        <th style="width:12%">金額</th><th style="width:28%">摘要</th><th style="width:30px"></th>
       </tr></thead><tbody></tbody></table>
       <div class="row" style="margin-top:6px"><button id="p-addrow">行追加</button>
         <span class="muted">金額 0 (空欄) は、呼び出したときに都度入力します。</span></div>
@@ -962,7 +956,6 @@ routes.templates = async function (main) {
         <td><input data-f="dr" placeholder="コード・かな・名称"></td><td><input data-f="drsub" placeholder="補助"></td>
         <td><input data-f="cr" placeholder="コード・かな・名称"></td><td><input data-f="crsub" placeholder="補助"></td>
         <td><input data-f="amount" class="num" inputmode="numeric"></td>
-        <td><select data-f="tax"><option value="">(科目の既定)</option>${S.meta.tax_classes.map(x => `<option value="${x.code}">${x.code} ${esc(x.short)}</option>`).join('')}</select></td>
         <td><input data-f="desc"></td>
         <td class="act"><button class="small" tabindex="-1" data-f="del" title="行削除">×</button></td></tr>`);
       body.appendChild(tr);
@@ -980,7 +973,6 @@ routes.templates = async function (main) {
       if (l.credit_account_id) cr.set(l.credit_account_id);
       if (l.credit_sub_id) crSub.set(l.credit_sub_id);
       if (l.amount) f('amount').value = fmt(l.amount);
-      f('tax').value = l.tax_class || '';
       f('desc').value = l.description || '';
       f('del').onclick = () => { if (body.children.length > 1) { tr.remove(); renumber(); } };
       renumber();
@@ -995,7 +987,7 @@ routes.templates = async function (main) {
         return {
           debit_account_id: c.dr.id, debit_sub_id: c.drSub.id,
           credit_account_id: c.cr.id, credit_sub_id: c.crSub.id,
-          amount: parseAmount(f('amount').value), tax_class: f('tax').value, description: f('desc').value.trim(),
+          amount: parseAmount(f('amount').value), description: f('desc').value.trim(),
         };
       }).filter(l => l.debit_account_id || l.credit_account_id || l.amount || l.description);
     }
@@ -1044,7 +1036,6 @@ routes.templates = async function (main) {
           <td>${esc(acctLabel(l.debit_account_id))}${l.debit_sub_id ? ' / ' + esc(subLabel(l.debit_sub_id)) : ''}</td>
           <td>${esc(acctLabel(l.credit_account_id))}${l.credit_sub_id ? ' / ' + esc(subLabel(l.credit_sub_id)) : ''}</td>
           <td class="num">${l.amount ? fmt(l.amount) : '<span class="muted">都度</span>'}</td>
-          <td>${l.tax_class ? esc(taxName(l.tax_class)) : '<span class="muted">既定</span>'}</td>
           <td>${esc(l.description || '')}</td>
           <td style="white-space:nowrap">${i === 0 ? `<button class="small" data-edit="${t.id}">修正</button> <button class="small danger" data-del="${t.id}">削除</button>` : ''}</td>
         </tr>`);
@@ -1142,23 +1133,22 @@ routes.clients = async function (main) {
   <div class="two-col">
     <div class="panel">
       <div class="row between"><h3 style="margin:0">顧問先</h3><button id="c-new" class="primary">顧問先を追加</button></div>
-      <table class="grid compact" id="c-table" style="margin-top:8px"><thead><tr><th>コード</th><th>名称</th><th>形態</th><th>消費税</th><th>決算月</th><th></th></tr></thead><tbody></tbody></table>
+      <table class="grid compact" id="c-table" style="margin-top:8px"><thead><tr><th>コード</th><th>名称</th><th>形態</th><th>決算月</th><th></th></tr></thead><tbody></tbody></table>
     </div>
     <div class="panel" id="fy-panel"></div>
   </div>`;
   function clientForm(c) {
     const isNew = !c;
-    c = c || { code: String(S.clients.length + 1).padStart(3, '0'), name: '', kana: '', entity_type: 'corp', tax_method: 'inclusive', fiscal_start_month: 4, note: '' };
+    c = c || { code: String(S.clients.length + 1).padStart(3, '0'), name: '', kana: '', entity_type: 'corp', fiscal_start_month: 4, note: '' };
     formModal(isNew ? '顧問先の追加' : '顧問先の修正',
       field('コード', textInput('code', c.code, 'required maxlength="20"')) + field('名称', textInput('name', c.name, 'required')) + field('かな', textInput('kana', c.kana)) +
       field('事業形態', selectInput('entity_type', S.meta.entity_types.map(x => ({ value: x.code, label: x.name })), c.entity_type)) +
-      field('消費税の経理方式', selectInput('tax_method', S.meta.tax_methods.map(x => ({ value: x.code, label: x.name })), c.tax_method)) +
       field('期首月 (法人)', selectInput('fiscal_start_month', Array.from({ length: 12 }, (_, i) => ({ value: i + 1, label: `${i + 1}月` })), c.fiscal_start_month)) +
       field('備考', textInput('note', c.note), true) +
       (isNew ? field('入れる勘定科目表', selectInput('chart', (S.meta.charts || []).map(x => ({ value: x.code, label: x.name })), 'tkc'), true) +
         '<div class="field wide muted">作成後も「勘定科目」画面で自由に変更できます。会計期間は当期が自動作成されます。</div>' : ''),
       async (d) => {
-        const body = { code: d.code.trim(), name: d.name.trim(), kana: d.kana.trim(), entity_type: d.entity_type, tax_method: d.tax_method, fiscal_start_month: Number(d.fiscal_start_month), note: d.note };
+        const body = { code: d.code.trim(), name: d.name.trim(), kana: d.kana.trim(), entity_type: d.entity_type, fiscal_start_month: Number(d.fiscal_start_month), note: d.note };
         if (isNew) body.chart = d.chart;
         let saved;
         if (isNew) saved = await POST('/api/clients', body); else saved = await PUT(`/api/clients/${c.id}`, body);
@@ -1177,9 +1167,9 @@ routes.clients = async function (main) {
   function draw() {
     $('#c-table tbody').innerHTML = S.clients.map(c => `<tr class="clickable ${S.client && c.id === S.client.id ? 'selected' : ''}" data-id="${c.id}">
       <td class="code">${esc(c.code)}</td><td>${esc(c.name)}</td><td>${c.entity_type === 'sole' ? '個人' : '法人'}</td>
-      <td>${esc((S.meta.tax_methods.find(t => t.code === c.tax_method) || {}).name || '')}</td><td class="center">${c.entity_type === 'sole' ? '12月' : ((c.fiscal_start_month + 10) % 12 + 1) + '月'}</td>
+      <td class="center">${c.entity_type === 'sole' ? '12月' : ((c.fiscal_start_month + 10) % 12 + 1) + '月'}</td>
       <td style="white-space:nowrap"><button class="small" data-edit="${c.id}">修正</button> <button class="small danger" data-del="${c.id}">削除</button></td></tr>`).join('')
-      || '<tr><td colspan="6" class="empty">顧問先がありません。「顧問先を追加」から登録してください。</td></tr>';
+      || '<tr><td colspan="5" class="empty">顧問先がありません。「顧問先を追加」から登録してください。</td></tr>';
     drawFy();
   }
   function drawFy() {
@@ -1288,13 +1278,13 @@ routes.data = async function (main) {
       <a class="btn" href="/api/fiscal-years/${S.fy ? S.fy.id : 0}/export/journal.csv">仕訳 CSV をダウンロード</a>` : '<p class="muted">顧問先を選択してください</p>'}
     </div>
     <div class="panel"><h3 style="margin-top:0">仕訳 CSV 取込</h3>
-      ${hasClient ? `<p>本ソフトで出力した形式の CSV を取り込みます (UTF-8 / Shift_JIS)。科目はコードまたは科目名で照合します。同じ「日付+伝票番号」の行は 1 伝票にまとめます。<br><b>日付・金額・摘要・補助科目が同じ伝票が既にあれば取り込みません。</b>科目や消費税区分は比較しないので、取り込んだ後に科目を付け替えた仕訳があっても、同じ通帳履歴をもう一度取り込んで二重計上になることはありません。</p><p class="help"><b>ファイルを選ぶと、どの通帳 (補助科目) のものかを必ず確認します。</b>選んだ補助科目は、<b>その補助科目が属する科目の行で補助科目が空のものに、まとめて付けます</b> (CSV に補助科目が書いてあればそちらが優先)。まだ登録していない通帳は、その場で登録できます。補助科目で通帳を区別するので、別々の口座に同じ日・同じ金額・同じ摘要の入出金があっても、片方だけ取り込まれないということは起きません。</p>
+      ${hasClient ? `<p>本ソフトで出力した形式の CSV を取り込みます (UTF-8 / Shift_JIS)。科目はコードまたは科目名で照合します。同じ「日付+伝票番号」の行は 1 伝票にまとめます。<br><b>日付・金額・摘要・補助科目が同じ伝票が既にあれば取り込みません。</b>科目は比較しないので、取り込んだ後に科目を付け替えた仕訳があっても、同じ通帳履歴をもう一度取り込んで二重計上になることはありません。</p><p class="help"><b>ファイルを選ぶと、どの通帳 (補助科目) のものかを必ず確認します。</b>選んだ補助科目は、<b>その補助科目が属する科目の行で補助科目が空のものに、まとめて付けます</b> (CSV に補助科目が書いてあればそちらが優先)。まだ登録していない通帳は、その場で登録できます。補助科目で通帳を区別するので、別々の口座に同じ日・同じ金額・同じ摘要の入出金があっても、片方だけ取り込まれないということは起きません。</p>
       <div class="row"><input type="file" id="i-file" accept=".csv,text/csv"><button id="i-check">検証</button><button id="i-run" class="primary">取込</button></div>
       <div class="row" style="margin-top:6px;gap:8px;align-items:center">
         <span class="muted">通帳 (補助科目):</span><b id="i-sub-label" class="muted">ファイルを選ぶと確認します</b>
         <button id="i-sub-change" class="small">選び直す / 通帳を登録</button></div>
       <div id="i-result" style="margin-top:8px"></div>
-      <details style="margin-top:8px"><summary class="muted">CSV の列</summary><code style="font-size:11px">日付, 伝票番号, 借方科目コード, 借方科目名, 借方補助コード, 借方補助名, 借方部門コード, 貸方科目コード, 貸方科目名, 貸方補助コード, 貸方補助名, 貸方部門コード, 金額, 消費税区分, 消費税額, 摘要, 伝票メモ</code></details>` : '<p class="muted">顧問先を選択してください</p>'}
+      <details style="margin-top:8px"><summary class="muted">CSV の列</summary><code style="font-size:11px">日付, 伝票番号, 借方科目コード, 借方科目名, 借方補助コード, 借方補助名, 借方部門コード, 貸方科目コード, 貸方科目名, 貸方補助コード, 貸方補助名, 貸方部門コード, 金額, 摘要, 伝票メモ</code></details>` : '<p class="muted">顧問先を選択してください</p>'}
     </div>
     <div class="panel"><h3 style="margin-top:0">繰越処理</h3>
       ${hasClient && S.fy ? `<p>「${esc(S.fy.label)}」の期末残高を翌期の期首残高へ転記します。翌期が無い場合は自動作成します。当期純利益は ${S.client.entity_type === 'sole' ? '元入金' : '繰越利益剰余金'} へ加算されます。<br>翌期の期首残高は上書きされます。決算確定後に実行してください (何度でも再実行できます)。</p>

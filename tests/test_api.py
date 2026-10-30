@@ -42,7 +42,7 @@ def test_create_client_copies_standard_accounts(client):
     _, _, acc2 = make_client(client, entity_type="sole", code="002")
     assert "420" in acc2 and "412" not in acc2
     meta = client.get("/api/meta").json()
-    assert any(t["code"] == "11" for t in meta["tax_classes"])
+    assert "tax_classes" not in meta and "tax_methods" not in meta   # 消費税は扱わない
 
 
 def test_entry_validation(client):
@@ -58,20 +58,20 @@ def test_entry_validation(client):
     r = client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": "1999-01-01", "lines": [
         {"debit_account_id": acc["100"]["id"], "credit_account_id": acc["500"]["id"], "amount": 1000}]})
     assert r.status_code == 400
-    # 正常 (単一仕訳, 内税自動計算)
+    # 正常 (単一仕訳)。以前の画面・CSV から消費税区分が送られてきても無視する
     r = client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": d, "lines": [
         {"debit_account_id": acc["100"]["id"], "credit_account_id": acc["500"]["id"], "amount": 11000,
          "tax_class": "11", "description": "現金売上"}]})
     assert r.status_code == 201, r.text
     e = r.json()
     assert e["voucher_no"] == 1
-    assert e["lines"][0]["tax_amount"] == 1000
+    assert e["lines"][0]["amount"] == 11000 and e["lines"][0]["tax_amount"] == 0
     assert e["lines"][0]["debit_name"] == "現金"
     # 更新
     r = client.put(f"/api/entries/{e['id']}", json={"entry_date": d, "lines": [
         {"debit_account_id": acc["111"]["id"], "credit_account_id": acc["500"]["id"], "amount": 22000, "tax_class": "11"}]})
     assert r.status_code == 200
-    assert r.json()["lines"][0]["tax_amount"] == 2000
+    assert r.json()["lines"][0]["amount"] == 22000
     lst = client.get(f"/api/clients/{cl['id']}/entries", params={"account_id": acc["111"]["id"]}).json()
     assert lst["total"] == 1
     # 削除
@@ -100,8 +100,8 @@ def post_sample_entries(client, cl, fy, acc):
     r.raise_for_status()
 
 
-def test_trial_balance_inclusive_and_statements(client):
-    cl, fy, acc = make_client(client, tax_method="inclusive")
+def test_trial_balance_and_statements(client):
+    cl, fy, acc = make_client(client)
     post_sample_entries(client, cl, fy, acc)
     tb = client.get(f"/api/fiscal-years/{fy['id']}/reports/trial-balance").json()
     rows = {r["code"]: r for r in tb["rows"]}
@@ -111,7 +111,7 @@ def test_trial_balance_inclusive_and_statements(client):
     assert rows["617"]["closing_n"] == 33000
     assert rows["601"]["closing_n"] == 300000
     assert rows["316"]["closing_n"] == 30000
-    assert "166" not in rows and "318" not in rows  # 税込経理では消費税科目に転記しない
+    assert "166" not in rows and "318" not in rows  # 消費税科目には転記しない (金額のまま)
     assert tb["net_income"]["closing"] == 110000 - 33000 - 300000
     # 借方合計 = 貸方合計
     assert sum(r["debit"] for r in tb["rows"]) == sum(r["credit"] for r in tb["rows"])
@@ -131,27 +131,32 @@ def test_trial_balance_inclusive_and_statements(client):
     m = {r["code"]: r for r in monthly["rows"]}
     assert m["500"]["total"] == 110000
 
-    tax = client.get(f"/api/fiscal-years/{fy['id']}/reports/tax-summary").json()
-    assert tax["sales_tax"] == 10000 and tax["purchase_tax"] == 3000 and tax["net_tax"] == 7000
+    # 消費税集計表は無くなった
+    assert client.get(f"/api/fiscal-years/{fy['id']}/reports/tax-summary").status_code == 404
 
 
-def test_trial_balance_exclusive_splits_tax(client):
-    cl, fy, acc = make_client(client, tax_method="exclusive")
+def test_old_tax_data_is_ignored(client):
+    """消費税を扱っていた頃のデータ (税抜経理の顧問先・内税額の入った仕訳) があっても、金額のまま集計する。"""
+    cl, fy, acc = make_client(client)
     post_sample_entries(client, cl, fy, acc)
+    from app.db import db
+    with db() as conn:
+        conn.execute("UPDATE clients SET tax_method='exclusive' WHERE id=?", (cl["id"],))
+        conn.execute("UPDATE journal_lines SET tax_class='11', tax_rate=10, tax_amount=amount/11 "
+                     "WHERE credit_account_id=?", (acc["500"]["id"],))
+        conn.execute("UPDATE accounts SET role='tax_payable' WHERE id=?", (acc["318"]["id"],))
     tb = client.get(f"/api/fiscal-years/{fy['id']}/reports/trial-balance").json()
     rows = {r["code"]: r for r in tb["rows"]}
-    assert rows["500"]["closing_n"] == 100000
-    assert rows["318"]["closing_n"] == 10000   # 仮受消費税
-    assert rows["617"]["closing_n"] == 30000
-    assert rows["166"]["closing_n"] == 3000    # 仮払消費税
-    assert rows["100"]["closing_n"] == 77000   # 現金は税込のまま
-    assert sum(r["debit"] for r in tb["rows"]) == sum(r["credit"] for r in tb["rows"])
-    fs = client.get(f"/api/fiscal-years/{fy['id']}/reports/financial-statements").json()
-    assert fs["bs"]["total_assets"] == fs["bs"]["total_liabilities_equity"]
+    assert rows["500"]["closing_n"] == 110000 and "318" not in rows
+    # 起動時の移行で、仮受・仮払消費税の役割は外れる (勘定科目画面で保存できなくならないように)
+    from app.db import init_db
+    init_db()
+    accts = {a["code"]: a for a in client.get(f"/api/clients/{cl['id']}/accounts").json()}
+    assert accts["318"]["role"] == ""
 
 
 def test_carry_forward(client):
-    cl, fy, acc = make_client(client, tax_method="inclusive")
+    cl, fy, acc = make_client(client)
     post_sample_entries(client, cl, fy, acc)
     r = client.post(f"/api/fiscal-years/{fy['id']}/carry-forward")
     assert r.status_code == 200, r.text
@@ -309,15 +314,16 @@ def test_accounts_bulk_save(client):
 
 
 def test_accounts_csv_roundtrip_and_replace(client):
-    cl, fy, acc = make_client(client, tax_method="exclusive")
+    cl, fy, acc = make_client(client)
     cid = cl["id"]
     r = client.get(f"/api/clients/{cid}/export/accounts.csv")
     assert r.status_code == 200
     text = r.content.decode("utf-8-sig")
-    assert text.splitlines()[0].startswith("コード,科目名,かな,表示区分,既定の税区分,役割,並び順,有効")
-    assert "仮受消費税" in text
+    assert text.splitlines()[0].startswith("コード,科目名,かな,表示区分,役割,並び順,有効")
+    assert "仮受消費税" in text            # 科目そのものは残っている
 
-    # 自前 (TKC 風) の科目表に丸ごと入れ替える
+    # 自前 (TKC 風) の科目表に丸ごと入れ替える。
+    # 消費税を扱っていた頃の CSV (既定の税区分の列・仮払/仮受消費税の役割) もそのまま読める
     csv_text = ("﻿" + "\r\n".join([
         "コード,科目名,かな,表示区分,既定の税区分,役割,並び順,有効",
         "1101,現金,げんきん,流動資産,00,,10,1",
@@ -345,48 +351,49 @@ def test_accounts_csv_roundtrip_and_replace(client):
     assert imp.status_code == 200, imp.text
     after = {a["code"]: a for a in client.get(f"/api/clients/{cid}/accounts").json()}
     assert set(after) == {"1101", "1102", "1301", "2101", "2301", "3201", "4101", "5101"}
-    assert after["4101"]["default_tax_class"] == "11"       # 名称からコードを解決
-    assert after["1301"]["role"] == "tax_receivable"        # 日本語の役割名を解決
+    assert after["1301"]["role"] == ""                      # 消費税の役割は付けない
+    assert after["3201"]["role"] == "retained"              # 日本語の役割名を解決
     assert after["3201"]["category"] == "equity"
 
-    # 入れ替えた科目表で税抜経理の仕訳・繰越が動く
+    # 入れ替えた科目表で仕訳・繰越が動く (消費税は分けず、金額のまま)
     client.post(f"/api/clients/{cid}/entries", json={"entry_date": fy["start_date"], "lines": [
         {"debit_account_id": after["1101"]["id"], "credit_account_id": after["4101"]["id"],
-         "amount": 110000, "tax_class": "11"}]}).raise_for_status()
+         "amount": 110000}]}).raise_for_status()
     tb = client.get(f"/api/fiscal-years/{fy['id']}/reports/trial-balance").json()
     rows = {x["code"]: x for x in tb["rows"]}
-    assert rows["4101"]["closing_n"] == 100000
-    assert rows["2301"]["closing_n"] == 10000
+    assert rows["4101"]["closing_n"] == 110000 and "2301" not in rows
     cf = client.post(f"/api/fiscal-years/{fy['id']}/carry-forward")
     assert cf.status_code == 200, cf.text
     ob = {o["account_code"]: o["amount"] for o in
           client.get(f"/api/fiscal-years/{cf.json()['next_fiscal_year']['id']}/opening-balances").json()}
-    assert ob["1101"] == 110000 and ob["3201"] == -100000
+    assert ob["1101"] == 110000 and ob["3201"] == -110000
     assert sum(ob.values()) == 0
 
 
 def test_accounts_csv_import_validation_and_warnings(client):
-    cl, fy, acc = make_client(client, tax_method="exclusive")
+    cl, fy, acc = make_client(client)
     cid = cl["id"]
 
     def send(body, **params):
         files = {"file": ("a.csv", io.BytesIO(body.encode("utf-8")), "text/csv")}
         return client.post(f"/api/clients/{cid}/import/accounts", params=params, files=files)
 
-    head = "コード,科目名,表示区分,既定の税区分,役割\r\n"
-    assert send(head + "100,現金,ありえない区分,00,\r\n").status_code == 400
-    assert send(head + "100,現金,流動資産,99,\r\n").status_code == 400
-    assert send(head + "100,現金,流動資産,00,ありえない役割\r\n").status_code == 400
-    assert send(head + "100,現金,流動資産,00,\r\n100,重複,流動資産,00,\r\n").status_code == 400
-    assert send(head + ",名前なし,流動資産,00,\r\n").status_code == 400
-    r = send(head + "100,現金,流動資産,00,仮払消費税\r\n101,小口,流動資産,00,仮払消費税\r\n")
+    head = "コード,科目名,表示区分,役割\r\n"
+    assert send(head + "100,現金,ありえない区分,\r\n").status_code == 400
+    assert send(head + "100,現金,流動資産,ありえない役割\r\n").status_code == 400
+    assert send(head + "100,現金,流動資産,\r\n100,重複,流動資産,\r\n").status_code == 400
+    assert send(head + ",名前なし,流動資産,\r\n").status_code == 400
+    r = send(head + "100,現金,流動資産,諸口\r\n101,小口,流動資産,諸口\r\n")
     assert r.status_code == 400 and "重複" in r.json()["detail"]
+    # 以前の CSV の税区分の列は、どんな値でも読み飛ばす
+    old = "コード,科目名,表示区分,既定の税区分,役割\r\n"
+    assert send(old + "100,現金,流動資産,99,\r\n", dry_run=True).status_code == 200
 
     # replace で必要な役割が欠けると警告が返る (取込自体は行われる)
-    r = send(head + "100,現金,流動資産,00,\r\n", mode="replace", dry_run=True)
+    r = send(head + "100,現金,流動資産,\r\n", mode="replace", dry_run=True)
     assert r.status_code == 200
     w = " ".join(r.json()["warnings"])
-    assert "仮払消費税" in w and "仮受消費税" in w and "繰越利益剰余金" in w
+    assert "繰越利益剰余金" in w and "消費税" not in w
 
 
 def test_copy_accounts_between_clients_and_empty_chart(client):
@@ -450,9 +457,7 @@ def test_tkc_chart_matches_the_reference_table(client):
     # 法人には事業主勘定を入れない
     assert "9411" not in acc and "9311" not in acc
     assert acc["3111"]["category"] == "equity"
-    assert acc["1164"]["role"] == "tax_receivable"
-    assert acc["4111"]["default_tax_class"] == "11"
-    assert acc["5211"]["default_tax_class"] == "21"
+    assert acc["1164"]["role"] == ""          # 消費税は扱わないので、仮払消費税等に役割は付けない
 
 
 def test_tkc_chart_provisional_accounts(client):
@@ -460,7 +465,7 @@ def test_tkc_chart_provisional_accounts(client):
     from app.master_data import PROVISIONAL_MARK
     cl, fy, acc = make_client(client, chart="tkc")
     prov = {c: a for c, a in acc.items() if PROVISIONAL_MARK in a["name"]}
-    assert {a["role"] for a in prov.values()} == {"tax_payable", "retained", ""}
+    assert {a["role"] for a in prov.values()} == {"retained", ""}
     assert len(prov) == 3   # 仮受消費税等 / 未払消費税等 / 繰越利益剰余金
 
     _, _, sole = make_client(client, entity_type="sole", code="002", chart="tkc")
@@ -468,15 +473,14 @@ def test_tkc_chart_provisional_accounts(client):
     assert sole["9311"]["role"] == "owner_contrib"
     assert "3111" not in sole
     sole_prov = {c: a for c, a in sole.items() if PROVISIONAL_MARK in a["name"]}
-    assert {a["role"] for a in sole_prov.values()} == {"tax_payable", "owner_capital", ""}
+    assert {a["role"] for a in sole_prov.values()} == {"owner_capital", ""}
 
 
 def test_tkc_chart_full_workflow(client):
-    """TKC 科目表で税抜経理の仕訳・帳票・繰越が一通り動くこと。"""
-    cl, fy, acc = make_client(client, tax_method="exclusive", chart="tkc")
+    """TKC 科目表で仕訳・帳票・繰越が一通り動くこと。"""
+    cl, fy, acc = make_client(client, chart="tkc")
     cid, d = cl["id"], fy["start_date"]
     aid = {c: a["id"] for c, a in acc.items()}
-    prov_payable = next(c for c, a in acc.items() if a["role"] == "tax_payable")
     prov_retained = next(c for c, a in acc.items() if a["role"] == "retained")
 
     # 資本金 / 売上 / 仕入 / 給与 (複合)
@@ -494,19 +498,15 @@ def test_tkc_chart_full_workflow(client):
 
     tb = client.get(f"/api/fiscal-years/{fy['id']}/reports/trial-balance").json()
     rows = {r["code"]: r for r in tb["rows"]}
-    assert rows["4111"]["closing_n"] == 500000          # 税抜の売上
-    assert rows[prov_payable]["closing_n"] == 50000     # 仮受消費税等
-    assert rows["5211"]["closing_n"] == 200000          # 税抜の仕入
-    assert rows["1164"]["closing_n"] == 20000           # 仮払消費税等
-    assert rows["1122"]["closing_n"] == 550000          # 売掛金は税込
+    assert rows["4111"]["closing_n"] == 550000          # 消費税は分けず、金額のまま
+    assert rows["5211"]["closing_n"] == 220000
+    assert "1164" not in rows                           # 仮払消費税等には転記しない
+    assert rows["1122"]["closing_n"] == 550000
     assert sum(r["debit"] for r in tb["rows"]) == sum(r["credit"] for r in tb["rows"])
 
     fs = client.get(f"/api/fiscal-years/{fy['id']}/reports/financial-statements").json()
     assert fs["bs"]["total_assets"] == fs["bs"]["total_liabilities_equity"]
-    assert fs["pl"]["gross_profit"] == 300000
-
-    tax = client.get(f"/api/fiscal-years/{fy['id']}/reports/tax-summary").json()
-    assert tax["sales_tax"] == 50000 and tax["purchase_tax"] == 20000 and tax["net_tax"] == 30000
+    assert fs["pl"]["gross_profit"] == 330000
 
     cf = client.post(f"/api/fiscal-years/{fy['id']}/carry-forward")
     assert cf.status_code == 200, cf.text
@@ -515,22 +515,16 @@ def test_tkc_chart_full_workflow(client):
     assert ob["1113"] == 775000
     assert ob["2117"] == -25000
     assert ob["3111"] == -1000000
-    assert ob[prov_retained] == -(500000 - 200000 - 250000)
+    assert ob[prov_retained] == -(550000 - 220000 - 250000)
     assert sum(ob.values()) == 0
 
 
-def test_meta_exposes_charts_and_tkc_tax_divisions(client):
+def test_meta_exposes_charts(client):
     meta = client.get("/api/meta").json()
     assert [c["code"] for c in meta["charts"]] == ["tkc", "standard", "none"]
     assert meta["provisional_prefix"] == "Z"
-    div = {d["code"]: d["name"] for d in meta["tkc_tax_divisions"]}
-    assert div["1"] == "課税売上げ"
-    assert div["5"] == "課税売上げにのみ要する課税仕入れ"
-    assert div["52"] == "免税事業者等からの課税仕入れ（課税売上げ）"
-    assert div["0"] == "不課税取引（税外取引）"
-    tc = {t["code"]: t for t in meta["tax_classes"]}
-    assert tc["11"]["tkc"] == "1" and tc["13"]["tkc"] == "3" and tc["23"]["tkc"] == "8"
-    assert tc["21"]["tkc"] == "5 / 6 / 7"
+    assert "tkc_tax_divisions" not in meta and "tax_classes" not in meta
+    assert {r["code"] for r in meta["roles"]} == {"", "retained", "owner_capital", "owner_drawing", "owner_contrib", "suspense"}
 
 
 def test_invalid_chart_is_rejected(client):

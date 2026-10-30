@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS clients (
   name TEXT NOT NULL,
   kana TEXT NOT NULL DEFAULT '',
   entity_type TEXT NOT NULL DEFAULT 'corp',      -- corp: 法人 / sole: 個人
-  tax_method TEXT NOT NULL DEFAULT 'inclusive',   -- inclusive: 税込経理 / exclusive: 税抜経理 / exempt: 免税
+  tax_method TEXT NOT NULL DEFAULT 'inclusive',   -- 使っていない (消費税を扱っていた頃の名残。データ保全のため列は残す)
   fiscal_start_month INTEGER NOT NULL DEFAULT 4,
   note TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
@@ -59,8 +59,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   kana TEXT NOT NULL DEFAULT '',
   category TEXT NOT NULL,          -- asset / liability / equity / revenue / expense
   grp TEXT NOT NULL,               -- 流動資産, 固定資産, ... (表示区分)
-  default_tax_class TEXT NOT NULL DEFAULT '00',
-  role TEXT NOT NULL DEFAULT '',   -- tax_receivable / tax_payable / retained / owner_capital / owner_drawing / owner_contrib / suspense
+  default_tax_class TEXT NOT NULL DEFAULT '00',   -- 使っていない (同上)
+  role TEXT NOT NULL DEFAULT '',   -- retained / owner_capital / owner_drawing / owner_contrib / suspense
   sort_order INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1,
   UNIQUE(client_id, code)
@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS journal_lines (
   credit_sub_id INTEGER REFERENCES sub_accounts(id),
   credit_dept_id INTEGER REFERENCES departments(id),
   amount INTEGER NOT NULL,
+  -- 以下 3 列は使っていない (消費税を扱っていた頃の名残。過去の入力を消さないよう列は残す)
   tax_class TEXT NOT NULL DEFAULT '00',
   tax_rate INTEGER NOT NULL DEFAULT 0,
   tax_amount INTEGER NOT NULL DEFAULT 0,
@@ -160,7 +161,7 @@ CREATE TABLE IF NOT EXISTS entry_template_lines (
   credit_sub_id INTEGER REFERENCES sub_accounts(id) ON DELETE SET NULL,
   credit_dept_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
   amount INTEGER NOT NULL DEFAULT 0,
-  tax_class TEXT NOT NULL DEFAULT '',
+  tax_class TEXT NOT NULL DEFAULT '',   -- 使っていない (同上)
   description TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_template_lines ON entry_template_lines(template_id, line_no);
@@ -211,6 +212,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
     _move_template_lines(conn)
     _drop_removed(conn)
+    # 消費税は扱わなくなったので、仮払・仮受消費税の「役割」は外す (科目そのものは残る)。
+    # 残しておくと、勘定科目画面で保存するときに役割が不正と判定されるため。
+    conn.execute("UPDATE accounts SET role='' WHERE role IN ('tax_receivable','tax_payable')")
 
 
 def _move_template_lines(conn: sqlite3.Connection) -> None:

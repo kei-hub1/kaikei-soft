@@ -12,7 +12,6 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..db import db, now_iso
-from ..master_data import TAX_CLASS_MAP, calc_tax_inclusive, tax_class
 
 router = APIRouter(prefix="/api", tags=["journals"])
 
@@ -25,9 +24,9 @@ class LineIn(BaseModel):
     credit_sub_id: int | None = None
     credit_dept_id: int | None = None
     amount: int = Field(ge=0)
-    tax_class: str = "00"
-    tax_amount: int | None = None   # None の場合は内税で自動計算
     description: str = ""
+    # 消費税は扱わない (申告が必要な顧問先は別のソフトで処理する)。
+    # 以前の画面・CSV・定型仕訳から tax_class などが送られてきても無視する。
 
 
 class EntryIn(BaseModel):
@@ -59,7 +58,6 @@ def _validate_entry(conn, client_id: int, e: EntryIn) -> dict:
         raise HTTPException(409, f"{e.entry_date} の会計期間 ({fy['label']}) は締め切られています")
     if not e.lines:
         raise HTTPException(400, "仕訳行がありません")
-    client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
     acct_ids = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM accounts WHERE client_id=?", (client_id,)).fetchall()}
     sub_ids = {r["id"]: r["account_id"] for r in conn.execute(
         "SELECT s.id, s.account_id FROM sub_accounts s JOIN accounts a ON a.id=s.account_id WHERE a.client_id=?", (client_id,)).fetchall()}
@@ -81,16 +79,6 @@ def _validate_entry(conn, client_id: int, e: EntryIn) -> dict:
                     raise HTTPException(400, f"{i} 行目: {side}補助科目が科目と一致しません")
             if did and did not in dept_ids:
                 raise HTTPException(400, f"{i} 行目: {side}部門が不正です")
-        if l.tax_class not in TAX_CLASS_MAP:
-            raise HTTPException(400, f"{i} 行目: 消費税区分が不正です")
-        tc = tax_class(l.tax_class)
-        if client["tax_method"] == "exempt":
-            tax_rate, tax_amount = 0, 0
-        else:
-            tax_rate = tc["rate"]
-            tax_amount = l.tax_amount if l.tax_amount is not None else calc_tax_inclusive(l.amount, tax_rate)
-            if tax_rate == 0:
-                tax_amount = 0
         if l.debit_account_id:
             total_d += l.amount
         if l.credit_account_id:
@@ -98,7 +86,7 @@ def _validate_entry(conn, client_id: int, e: EntryIn) -> dict:
         lines.append({
             "debit_account_id": l.debit_account_id, "debit_sub_id": l.debit_sub_id or None, "debit_dept_id": l.debit_dept_id or None,
             "credit_account_id": l.credit_account_id, "credit_sub_id": l.credit_sub_id or None, "credit_dept_id": l.credit_dept_id or None,
-            "amount": l.amount, "tax_class": l.tax_class, "tax_rate": tax_rate, "tax_amount": tax_amount,
+            "amount": l.amount,
             "description": l.description.strip(),
         })
     if total_d != total_c:
@@ -109,9 +97,9 @@ def _validate_entry(conn, client_id: int, e: EntryIn) -> dict:
 def _insert_lines(conn, entry_id: int, lines: list[dict]) -> None:
     conn.executemany(
         "INSERT INTO journal_lines(entry_id,line_no,debit_account_id,debit_sub_id,debit_dept_id,credit_account_id,credit_sub_id,credit_dept_id,"
-        "amount,tax_class,tax_rate,tax_amount,description) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "amount,description) VALUES(?,?,?,?,?,?,?,?,?,?)",
         [(entry_id, i, l["debit_account_id"], l["debit_sub_id"], l["debit_dept_id"], l["credit_account_id"], l["credit_sub_id"],
-          l["credit_dept_id"], l["amount"], l["tax_class"], l["tax_rate"], l["tax_amount"], l["description"])
+          l["credit_dept_id"], l["amount"], l["description"])
          for i, l in enumerate(lines, 1)],
     )
 

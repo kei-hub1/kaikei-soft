@@ -15,7 +15,6 @@ const S = {
   templates: [],
   descriptions: [],       // 摘要プリセット
   descriptionItems: [],   // 入力候補 (プリセット + 過去に使った摘要)
-  taxById: {},
 };
 
 const routes = {};   // name -> render(fn)
@@ -218,16 +217,12 @@ function confirmDialog(msg) {
 }
 
 // ---------------------------------------------------------------- master loading
-function taxName(code) { const t = S.taxById[code]; return t ? t.name : code; }
-function taxShort(code) { const t = S.taxById[code]; return t ? t.short : code; }
 function acctLabel(id) { const a = S.accountById[id]; return a ? `${a.code} ${a.name}` : ''; }
 function subLabel(id) { const s = S.subById[id]; return s ? s.name : ''; }
 function deptLabel(id) { const d = S.departments.find(x => x.id === id); return d ? d.name : ''; }
-function isExempt() { return S.client && S.client.tax_method === 'exempt'; }
 
 async function loadMeta() {
   S.meta = await GET('/api/meta');
-  S.taxById = Object.fromEntries(S.meta.tax_classes.map(t => [t.code, t]));
 }
 
 async function loadClients() {
@@ -252,9 +247,7 @@ async function selectClient(id, keepFy = false) {
     return;
   }
   const c = S.client;
-  const tm = S.meta.tax_methods.find(t => t.code === c.tax_method);
-  $('#client-badges').innerHTML =
-    `<span class="badge">${c.entity_type === 'sole' ? '個人' : '法人'}</span> <span class="badge">${esc(tm ? tm.name : c.tax_method)}</span>`;
+  $('#client-badges').innerHTML = `<span class="badge">${c.entity_type === 'sole' ? '個人' : '法人'}</span>`;
   await Promise.all([loadFiscalYears(keepFy), loadAccounts(), loadDepartments(), loadTemplates(), loadDescriptions()]);
 }
 
