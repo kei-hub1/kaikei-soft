@@ -39,6 +39,10 @@ class UserError(Exception):
     """設定や CSV の誤り。メッセージを表示して終了する。"""
 
 
+class Cancelled(Exception):
+    """入力の途中で中止した。"""
+
+
 # ─────────────────────────────────────────────
 # 設定
 # ─────────────────────────────────────────────
@@ -131,8 +135,12 @@ def normalize_amount(text: str) -> str:
     return re.sub(r"[,，円\s]", "", unicodedata.normalize("NFKC", text))
 
 
-def load_rows(path: Path, cfg: dict) -> tuple[list[str], list[Row], list[str]]:
-    """CSV を読む。戻り値は（見出し, 行, 誤りの一覧）。"""
+def load_rows(path: Path, cfg: dict, extra: dict[str, str] | None = None) -> tuple[list[str], list[Row], list[str]]:
+    """CSV を読む。戻り値は（見出し, 行, 誤りの一覧）。
+
+    extra は、すべての行に追加する値（例: 関与先の {消費税}）。見出しにも加えて返す。
+    """
+    extra = extra or {}
     csv_cfg = cfg.get("csv", {})
     date_col = csv_cfg.get("date_column", "日付")
     amount_col = csv_cfg.get("amount_column", "金額")
@@ -158,9 +166,9 @@ def load_rows(path: Path, cfg: dict) -> tuple[list[str], list[Row], list[str]]:
             errors.append(f"{line}行目: 日付「{values[date_col]}」を読み取れません")
             continue
         values.update(年=str(date.year), 月=str(date.month), 日=str(date.day),
-                      金額=normalize_amount(values[amount_col]))
+                      金額=normalize_amount(values[amount_col]), **extra)
         rows.append(Row(line, date, values))
-    return header, rows, errors
+    return header + [k for k in extra if k not in header], rows, errors
 
 
 def parse_month(text: str) -> tuple[int | None, int]:
@@ -169,6 +177,14 @@ def parse_month(text: str) -> tuple[int | None, int]:
     if not m or not 1 <= int(m.group(2)) <= 12:
         raise UserError(f"--month の形式が違います: {text}（例: 1 または 2026-01）")
     return (int(m.group(1)) if m.group(1) else None), int(m.group(2))
+
+
+def group_by_month(rows: list[Row]) -> dict[tuple[int, int], list[Row]]:
+    """（年, 月）ごとに分ける。古い月から順。"""
+    groups: dict[tuple[int, int], list[Row]] = {}
+    for r in sorted(rows, key=lambda r: (r.date.year, r.date.month, r.line)):
+        groups.setdefault((r.date.year, r.date.month), []).append(r)
+    return groups
 
 
 def filter_month(rows: list[Row], year: int | None, month: int) -> list[Row]:
@@ -299,6 +315,14 @@ def describe(action: Action) -> str:
     }[action.kind](action.value)
 
 
+def plan_lines(steps: list[Step], values: dict[str, str]) -> list[str]:
+    """1仕訳分の操作を、欄ごとに1行の説明にする。"""
+    lines: dict[str, list[str]] = {}
+    for a in build_actions(steps, values):
+        lines.setdefault(a.step, []).append(describe(a))
+    return [f"{step}: {' → '.join(descs)}" for step, descs in lines.items()]
+
+
 def row_summary(row: Row) -> str:
     v = row.values
     return (f"CSV {row.line}行目  {row.date:%Y/%m/%d}  "
@@ -421,8 +445,9 @@ class Sender:
 class Controller:
     """PgDn / PgUp による一時停止・再開と、入力先ウィンドウの確認。"""
 
-    def __init__(self, cfg: dict, target: dict, win: Win):
-        self.win, self.target = win, target
+    def __init__(self, cfg: dict, target: dict, win: Win, notify=print,
+                 quit_hint: str = "この画面をクリックして Ctrl+C"):
+        self.win, self.target, self.notify, self.quit_hint = win, target, notify, quit_hint
         self.resume_wait = cfg.get("timing", {}).get("resume_wait", 0.5)
         hk = cfg.get("hotkeys", {})
         self.pause_key, self.resume_key = hk.get("pause", "page down"), hk.get("resume", "page up")
@@ -430,6 +455,7 @@ class Controller:
         self.pause_label = names.get(self.pause_key, self.pause_key)
         self.resume_label = names.get(self.resume_key, self.resume_key)
         self.paused = True
+        self.cancelled = False
         self.target_pid: int | None = None
         self.position = ""   # 今どこを入力しているか（停止時の表示用）
 
@@ -445,16 +471,18 @@ class Controller:
     def _on_pause(self):
         if not self.paused:
             self.paused = True
-            print(f"\n■ 一時停止しました（{self.position}の手前）")
-            print(f"  再開: {self.resume_label}　／　終了: この画面をクリックして Ctrl+C")
+            self.notify(f"■ 一時停止しました（{self.position}の手前）\n"
+                        f"  再開: {self.resume_label}　／　終了: {self.quit_hint}")
 
     def _on_resume(self):
         self.paused = False
 
+    def cancel(self):
+        self.cancelled = True
+
     def stop(self, message: str):
         self.paused = True
-        print(f"\n■ {message}")
-        print(f"  再開: {self.resume_label}　／　終了: この画面をクリックして Ctrl+C")
+        self.notify(f"■ {message}\n  再開: {self.resume_label}　／　終了: {self.quit_hint}")
 
     def _target_ok(self) -> tuple[bool, str]:
         _, title, pid = self.win.foreground()
@@ -477,14 +505,18 @@ class Controller:
         while True:
             if self.paused:
                 while self.paused:
+                    if self.cancelled:
+                        raise Cancelled
                     time.sleep(0.05)
                 time.sleep(self.resume_wait)
                 ok, why = self._target_ok()
                 if ok:
-                    print("▶ 入力します")
+                    self.notify("▶ 入力します")
                     return
                 self.stop(why)
                 continue
+            if self.cancelled:
+                raise Cancelled
             ok, why = self._target_ok()
             if ok:
                 return
@@ -518,11 +550,13 @@ class Progress:
             "in_progress_line": in_progress,
             "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
         }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def write_log(message: str):
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
+def write_log(message: str, path: Path = LOG_FILE):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
         f.write(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}  {message}\n")
 
 
@@ -534,7 +568,8 @@ def ask_yes(prompt: str) -> bool:
 # 実行
 # ─────────────────────────────────────────────
 
-def run_rows(rows: list[Row], cfg: dict, ctl: Controller, sender: Sender, progress: Progress):
+def run_rows(rows: list[Row], cfg: dict, ctl: Controller, sender: Sender, progress: Progress,
+             notify=print, log_file: Path = LOG_FILE, on_row_done=None):
     timing = cfg.get("timing", {})
     key_interval = timing.get("key_interval", 0.2)
     paste_wait = timing.get("paste_wait", 0.3)
@@ -542,7 +577,7 @@ def run_rows(rows: list[Row], cfg: dict, ctl: Controller, sender: Sender, progre
     last_done = progress.last_completed
 
     for n, row in enumerate(rows, 1):
-        print(f"\n[{n}/{len(rows)}] {row_summary(row)}")
+        notify(f"[{n}/{len(rows)}] {row_summary(row)}")
         progress.save(last_done, row.line)
         for a in build_actions(cfg["steps"], row.values):
             ctl.position = f"CSV {row.line}行目の「{a.step}」"
@@ -567,7 +602,9 @@ def run_rows(rows: list[Row], cfg: dict, ctl: Controller, sender: Sender, progre
                 ctl.checkpoint()
         last_done = row.line
         progress.save(last_done, None)
-        write_log(f"完了  {row_summary(row)}")
+        write_log(f"完了  {row_summary(row)}", log_file)
+        if on_row_done:
+            on_row_done(n, len(rows))
         time.sleep(row_wait)
 
 
@@ -591,6 +628,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="設定ファイル（既定: config.toml）")
     p.add_argument("--dry-run", action="store_true", help="キーを送らず、送る予定の操作を表示するだけ")
     p.add_argument("--notepad", action="store_true", help="練習用: メモ帳に入力する")
+    p.add_argument("--tax", choices=["課税", "免税"], default="課税", help="関与先の消費税（既定: 課税）")
     p.add_argument("--from-line", type=int, help="CSV のこの行番号から入力する（記録より優先）")
     p.add_argument("--reset", action="store_true", help="前回の記録を無視して最初から入力する")
     p.add_argument("--watch-window", action="store_true", help="最前面のウィンドウのタイトル等を表示するだけ")
@@ -606,7 +644,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load_config(args.config)
         year, month = parse_month(args.month)
         month_label = f"{year}-{month:02d}" if year else f"{month:02d}"
-        header, all_rows, errors = load_rows(args.csv, cfg)
+        header, all_rows, errors = load_rows(args.csv, cfg, {"消費税": args.tax})
         rows = filter_month(all_rows, year, month)
         # 日付を読めない行は、どの月か分からないため、月に関係なく誤りとする
         more_errors, warnings = validate(rows, header, cfg)
@@ -652,11 +690,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             for row in rows:
                 print(f"\n── {row_summary(row)}")
-                lines: dict[str, list[str]] = {}
-                for a in build_actions(cfg["steps"], row.values):
-                    lines.setdefault(a.step, []).append(describe(a))
-                for step, descs in lines.items():
-                    print(f"   {step}: {' → '.join(descs)}")
+                for line in plan_lines(cfg["steps"], row.values):
+                    print(f"   {line}")
             print("\n（--dry-run のため、キーは送っていません）")
             return 0
 
@@ -673,13 +708,14 @@ def main(argv: list[str] | None = None) -> int:
         sender = Sender(cfg, win)
         ctl = Controller(cfg, target, win)
         ctl.install()
-        where = "メモ帳" if args.notepad else "財務エントリの「会計伝票」画面（カーソルは税区分の欄）"
+        first = "税区分" if args.tax == "課税" else "借方科目"
+        where = "メモ帳" if args.notepad else f"財務エントリの「会計伝票」画面（カーソルは{first}の欄）"
         print(f"\n{where}をクリックしてから、{ctl.resume_label} を押すと入力を始めます。")
         print(f"途中で止めるときは {ctl.pause_label}、再開は {ctl.resume_label} です。")
         write_log(f"開始  {args.csv}  {month_label}  {target_name}  CSV {rows[0].line}行目から")
         try:
             run_rows(rows, cfg, ctl, sender, progress)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, Cancelled):
             print(f"\n終了しました。記録: CSV {progress.last_completed}行目まで入力済み")
             if progress.in_progress:
                 print(f"※ CSV {progress.in_progress}行目は入力途中です。財務エントリの画面で確認してください。")
