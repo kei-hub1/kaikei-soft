@@ -64,7 +64,7 @@ function createEntryForm(root, opts = {}) {
       <kbd>Enter</kbd> 次の項目 / <kbd>Shift+Enter</kbd> 前の項目 / 科目はコード・かな・名称で検索 <kbd>↑↓</kbd> で選択 /
       金額欄で空欄のまま <kbd>Enter</kbd> → 差額を入力 / 摘要欄で <kbd>Enter</kbd> → 貸借一致なら${inDialog ? '保存' : '登録'}、不一致なら行追加 /
       資金諸口を使うと借方・貸方の合計を表示。釣り合うまで${inDialog ? '保存' : '登録'}できません /
-      補助科目がある科目は確定すると候補が開くので <kbd>↑↓</kbd> と <kbd>Enter</kbd> で選択 (不要ならそのまま <kbd>Enter</kbd>) /
+      補助科目がある科目は確定すると候補が開くので <kbd>↑↓</kbd> と <kbd>Enter</kbd> で選択 (打たずに <kbd>Enter</kbd> でコード 1 の補助、空のままなら <kbd>Tab</kbd>) /
       <kbd>Shift</kbd> 単独で押して離すと行追加 (同じ伝票にまとめる) /
       2 行目以降は科目欄で空のまま <kbd>Enter</kbd> → 前の行と同じ科目 (空のまま進むときは <kbd>Tab</kbd>) /
       <kbd>Ctrl+Del</kbd> 行削除 / 摘要は <kbd>F4</kbd> または入力で候補表示、コード入力 + <kbd>Enter</kbd> で展開
@@ -106,6 +106,8 @@ function createEntryForm(root, opts = {}) {
   // ---------------------------------------------------------------- 行
   function accountItems() { return S.accounts.filter(a => a.active); }
   function subItems(accountId) { return accountId ? (S.subsByAccount[accountId] || []).filter(s => s.active) : []; }
+  /** その科目の補助科目のうち、コードが 1 (1 / 01 / 001 …) のもの。無ければ null。 */
+  function subNumberOne(accountId) { return subItems(accountId).find(s => /^0*1$/.test(String(s.code).trim())) || null; }
   function deptItems() { return S.departments.filter(d => d.active); }
 
   function taxOptionsHtml() {
@@ -145,8 +147,12 @@ function createEntryForm(root, opts = {}) {
 
     // 補助科目はカーソルが入った時点で候補を出す。科目コードを打って Enter を押すと
     // ここに移ってくるので、そのまま上下キーと Enter で補助科目を選べる。
-    const drSub = makeCombo(f('drsub'), { items: () => subItems(dr.id), openOnFocus: true, onCommit: () => focusNext(f('drsub')) });
-    const crSub = makeCombo(f('crsub'), { items: () => subItems(cr.id), openOnFocus: true, onCommit: () => focusNext(f('crsub')) });
+    // 空欄のまま Enter を押したら、コード 1 (01 など) の補助科目を入れる。
+    // いちばんよく使う 1 番を打たずに済ませるため。空のままにしたいときは Tab で次の欄へ移る。
+    const drSub = makeCombo(f('drsub'), { items: () => subItems(dr.id), openOnFocus: true,
+      emptyFallback: () => subNumberOne(dr.id), onCommit: () => focusNext(f('drsub')) });
+    const crSub = makeCombo(f('crsub'), { items: () => subItems(cr.id), openOnFocus: true,
+      emptyFallback: () => subNumberOne(cr.id), onCommit: () => focusNext(f('crsub')) });
     // 空欄のまま Enter を押したら、前の行と同じ科目を入れる。
     // 複合仕訳で片側が同じ科目 (資金諸口など) の行を続けて書くときに打ち直さずに済む。
     // 空のままにしたいときは Enter ではなく Tab で次の欄へ移る。
