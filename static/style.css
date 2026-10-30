@@ -295,31 +295,31 @@ table.grid td > input[type=date]:focus { background: var(--focus); border-color:
    印刷は常にライトの配色で行うため、screen のときだけ切り替える。 */
 @media screen and (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    /* 黒ではなく、明るめのグレーが基調。文字も真っ白にせず、まぶしさを抑える */
-    --bg: #46494f; --panel: #51545b; --surface: #51545b; --surface-2: #5a5d64; --surface-3: #63676e; --nav-bg: #4b4e54;
-    --border: #6b6f77; --border-strong: #82868e; --text: #eeeff1; --text-2: #dfe0e3; --muted: #c3c6cb;
-    --accent: #4f78bb; --accent-hover: #456cab; --accent-bg: #5a6b87; --on-accent: #ffffff; --on-accent-muted: #e3ebf8;
-    --link: #b3cdf6;
-    --danger: #ffb0b0; --danger-bg: #6e5254; --danger-border: #a07070;
-    --ok: #a6e6c1; --ok-bg: #4c6657; --warn-bg: #6b6044; --warn-text: #f6e2a6; --warn-border: #b8964a;
-    --head-bg: #3b3d42; --head-text: #eeeff1; --head-input: #51545b; --head-border: #6b6f77; --head-muted: #d3d5d9;
-    --row-alt: #575a61; --focus: #7d6f47; --toast-bg: #eeeff1; --toast-text: #3b3d42;
-    --overlay: rgba(30,31,34,.5); --shadow: rgba(0,0,0,.3);
+    /* 真っ黒ではなく、少し温かみのあるダークグレーが基調。文字も真っ白にせず、まぶしさを抑える */
+    --bg: #262624; --panel: #30302e; --surface: #30302e; --surface-2: #383835; --surface-3: #403f3c; --nav-bg: #2b2b29;
+    --border: #4a4945; --border-strong: #64635e; --text: #ecebe6; --text-2: #d8d6cf; --muted: #aaa89f;
+    --accent: #4f74b3; --accent-hover: #4568a3; --accent-bg: #35404f; --on-accent: #ffffff; --on-accent-muted: #e3ebf8;
+    --link: #9fbef0;
+    --danger: #f2a3a0; --danger-bg: #4e3533; --danger-border: #85524f;
+    --ok: #9dd8b4; --ok-bg: #33463a; --warn-bg: #4b4330; --warn-text: #f1dba2; --warn-border: #a3843f;
+    --head-bg: #1f1e1d; --head-text: #ecebe6; --head-input: #30302e; --head-border: #4a4945; --head-muted: #c4c2ba;
+    --row-alt: #353532; --focus: #5c5134; --toast-bg: #ecebe6; --toast-text: #262624;
+    --overlay: rgba(10,10,9,.5); --shadow: rgba(0,0,0,.35);
     color-scheme: dark;
   }
 }
 @media screen {
   :root[data-theme="dark"] {
-    /* 黒ではなく、明るめのグレーが基調。文字も真っ白にせず、まぶしさを抑える */
-    --bg: #46494f; --panel: #51545b; --surface: #51545b; --surface-2: #5a5d64; --surface-3: #63676e; --nav-bg: #4b4e54;
-    --border: #6b6f77; --border-strong: #82868e; --text: #eeeff1; --text-2: #dfe0e3; --muted: #c3c6cb;
-    --accent: #4f78bb; --accent-hover: #456cab; --accent-bg: #5a6b87; --on-accent: #ffffff; --on-accent-muted: #e3ebf8;
-    --link: #b3cdf6;
-    --danger: #ffb0b0; --danger-bg: #6e5254; --danger-border: #a07070;
-    --ok: #a6e6c1; --ok-bg: #4c6657; --warn-bg: #6b6044; --warn-text: #f6e2a6; --warn-border: #b8964a;
-    --head-bg: #3b3d42; --head-text: #eeeff1; --head-input: #51545b; --head-border: #6b6f77; --head-muted: #d3d5d9;
-    --row-alt: #575a61; --focus: #7d6f47; --toast-bg: #eeeff1; --toast-text: #3b3d42;
-    --overlay: rgba(30,31,34,.5); --shadow: rgba(0,0,0,.3);
+    /* 真っ黒ではなく、少し温かみのあるダークグレーが基調。文字も真っ白にせず、まぶしさを抑える */
+    --bg: #262624; --panel: #30302e; --surface: #30302e; --surface-2: #383835; --surface-3: #403f3c; --nav-bg: #2b2b29;
+    --border: #4a4945; --border-strong: #64635e; --text: #ecebe6; --text-2: #d8d6cf; --muted: #aaa89f;
+    --accent: #4f74b3; --accent-hover: #4568a3; --accent-bg: #35404f; --on-accent: #ffffff; --on-accent-muted: #e3ebf8;
+    --link: #9fbef0;
+    --danger: #f2a3a0; --danger-bg: #4e3533; --danger-border: #85524f;
+    --ok: #9dd8b4; --ok-bg: #33463a; --warn-bg: #4b4330; --warn-text: #f1dba2; --warn-border: #a3843f;
+    --head-bg: #1f1e1d; --head-text: #ecebe6; --head-input: #30302e; --head-border: #4a4945; --head-muted: #c4c2ba;
+    --row-alt: #353532; --focus: #5c5134; --toast-bg: #ecebe6; --toast-text: #262624;
+    --overlay: rgba(10,10,9,.5); --shadow: rgba(0,0,0,.35);
     color-scheme: dark;
   }
 }
