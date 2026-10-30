@@ -294,27 +294,29 @@ table.grid td > input[type=date]:focus { background: var(--focus); border-color:
    印刷は常にライトの配色で行うため、screen のときだけ切り替える。 */
 @media screen and (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #111418; --panel: #1b1f24; --surface: #1b1f24; --surface-2: #23282f; --surface-3: #2b313a; --nav-bg: #1f242b;
-    --border: #3a414b; --border-strong: #566070; --text: #e6e8eb; --text-2: #c3c8cf; --muted: #9aa3ae;
-    --accent: #3b82f6; --accent-hover: #2563eb; --accent-bg: #1e2f4d; --on-accent: #ffffff; --on-accent-muted: #dbeafe;
-    --danger: #f87171; --danger-bg: #3d1f22; --danger-border: #7f2a2a;
-    --ok: #34d399; --ok-bg: #12352a; --warn-bg: #3a2f12; --warn-text: #fcd34d; --warn-border: #b45309;
-    --head-bg: #0b0d10; --head-text: #f3f4f6; --head-input: #23282f; --head-border: #3a414b; --head-muted: #b8bec7;
-    --row-alt: #20252b; --focus: #4a3d12; --toast-bg: #e6e8eb; --toast-text: #111418;
-    --overlay: rgba(0,0,0,.6); --shadow: rgba(0,0,0,.55);
+    /* 真っ黒ではなく、落ち着いたグレーが基調。文字も真っ白にせず、まぶしさを抑える */
+    --bg: #2f3136; --panel: #393c42; --surface: #393c42; --surface-2: #42454c; --surface-3: #4a4e55; --nav-bg: #34373c;
+    --border: #555960; --border-strong: #6c7078; --text: #dfe1e4; --text-2: #c9ccd0; --muted: #a7abb2;
+    --accent: #5f88cc; --accent-hover: #5279bb; --accent-bg: #3f4c62; --on-accent: #ffffff; --on-accent-muted: #e3ebf8;
+    --danger: #ee9090; --danger-bg: #563c3e; --danger-border: #8a5555;
+    --ok: #86cfa6; --ok-bg: #3a5446; --warn-bg: #554b31; --warn-text: #ecd28e; --warn-border: #a8853a;
+    --head-bg: #26282c; --head-text: #e8e9eb; --head-input: #393c42; --head-border: #555960; --head-muted: #c2c5ca;
+    --row-alt: #3e4147; --focus: #66593a; --toast-bg: #dfe1e4; --toast-text: #2f3136;
+    --overlay: rgba(20,21,24,.55); --shadow: rgba(0,0,0,.35);
     color-scheme: dark;
   }
 }
 @media screen {
   :root[data-theme="dark"] {
-    --bg: #111418; --panel: #1b1f24; --surface: #1b1f24; --surface-2: #23282f; --surface-3: #2b313a; --nav-bg: #1f242b;
-    --border: #3a414b; --border-strong: #566070; --text: #e6e8eb; --text-2: #c3c8cf; --muted: #9aa3ae;
-    --accent: #3b82f6; --accent-hover: #2563eb; --accent-bg: #1e2f4d; --on-accent: #ffffff; --on-accent-muted: #dbeafe;
-    --danger: #f87171; --danger-bg: #3d1f22; --danger-border: #7f2a2a;
-    --ok: #34d399; --ok-bg: #12352a; --warn-bg: #3a2f12; --warn-text: #fcd34d; --warn-border: #b45309;
-    --head-bg: #0b0d10; --head-text: #f3f4f6; --head-input: #23282f; --head-border: #3a414b; --head-muted: #b8bec7;
-    --row-alt: #20252b; --focus: #4a3d12; --toast-bg: #e6e8eb; --toast-text: #111418;
-    --overlay: rgba(0,0,0,.6); --shadow: rgba(0,0,0,.55);
+    /* 真っ黒ではなく、落ち着いたグレーが基調。文字も真っ白にせず、まぶしさを抑える */
+    --bg: #2f3136; --panel: #393c42; --surface: #393c42; --surface-2: #42454c; --surface-3: #4a4e55; --nav-bg: #34373c;
+    --border: #555960; --border-strong: #6c7078; --text: #dfe1e4; --text-2: #c9ccd0; --muted: #a7abb2;
+    --accent: #5f88cc; --accent-hover: #5279bb; --accent-bg: #3f4c62; --on-accent: #ffffff; --on-accent-muted: #e3ebf8;
+    --danger: #ee9090; --danger-bg: #563c3e; --danger-border: #8a5555;
+    --ok: #86cfa6; --ok-bg: #3a5446; --warn-bg: #554b31; --warn-text: #ecd28e; --warn-border: #a8853a;
+    --head-bg: #26282c; --head-text: #e8e9eb; --head-input: #393c42; --head-border: #555960; --head-muted: #c2c5ca;
+    --row-alt: #3e4147; --focus: #66593a; --toast-bg: #dfe1e4; --toast-text: #2f3136;
+    --overlay: rgba(20,21,24,.55); --shadow: rgba(0,0,0,.35);
     color-scheme: dark;
   }
 }
