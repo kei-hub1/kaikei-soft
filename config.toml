@@ -99,20 +99,32 @@ name = "借方科目"
 type = "{借方科目コード}"
 press = ["ENTER"]
 
-# 借方補助（補助科目のある科目のときだけ止まる欄。操作方法の確認待ち）
-# 例：1113 のときだけ一時停止して手で選ぶ場合
-# [[steps]]
-# name = "借方補助"
-# when_column = "借方科目コード"
-# when_in = ["1113"]
-# manual = "補助科目を選んでください"
+# 借方補助：CSV の借方補助コードが空でない行だけ、補助科目のウィンドウで補助コードを打って Enter
+[[steps]]
+name = "借方補助"
+when_not_empty = "借方補助コード"
+wait = 0.3                 # 補助科目のウィンドウが開くのを待つ
+[[steps]]
+name = "借方補助"
+when_not_empty = "借方補助コード"
+type = "{借方補助コード}"
+press = ["ENTER"]
 
 [[steps]]
 name = "貸方科目"
 type = "{貸方科目コード}"
 press = ["ENTER"]
 
-# 貸方補助（同上）
+# 貸方補助：借方補助と同じ
+[[steps]]
+name = "貸方補助"
+when_not_empty = "貸方補助コード"
+wait = 0.3
+[[steps]]
+name = "貸方補助"
+when_not_empty = "貸方補助コード"
+type = "{貸方補助コード}"
+press = ["ENTER"]
 
 [[steps]]
 name = "月日（月次入力のため日のみ）"

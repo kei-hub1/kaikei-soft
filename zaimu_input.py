@@ -263,7 +263,34 @@ def validate(rows: list[Row], header: list[str], cfg: dict) -> tuple[list[str], 
         for col in ("借方補助コード", "貸方補助コード"):
             if v.get(col) and col not in used_cols:
                 warnings.append(f"{where}: {col}「{v[col]}」がありますが、設定では補助科目を入力しません")
+    errors += check_sub_codes(rows)
     return errors, warnings
+
+
+SIDES = (("借方", "借方科目コード", "借方補助コード"), ("貸方", "貸方科目コード", "貸方補助コード"))
+
+
+def check_sub_codes(rows: list[Row]) -> list[str]:
+    """同じ科目で、補助コードがある行とない行が混ざっていないかを調べる。
+
+    補助科目のある科目なのに補助コードを入れ忘れると、財務エントリで補助科目のウィンドウが開き、
+    以降の欄がずれてしまうため。
+    """
+    with_sub: dict[str, list[int]] = {}
+    without_sub: dict[str, list[int]] = {}
+    for row in rows:
+        for _, code_col, sub_col in SIDES:
+            code = row.values.get(code_col, "")
+            if code:
+                target = with_sub if row.values.get(sub_col, "") else without_sub
+                target.setdefault(code, []).append(row.line)
+    errors = []
+    for code in sorted(set(with_sub) & set(without_sub)):
+        lines = sorted(set(without_sub[code]))
+        shown = "、".join(map(str, lines[:10])) + ("…" if len(lines) > 10 else "")
+        errors.append(f"科目「{code}」に補助コードのある行とない行が混ざっています。"
+                      f"補助コードがない行: {shown}行目")
+    return errors
 
 
 def _cp932_ok(ch: str) -> bool:
@@ -323,10 +350,16 @@ def plan_lines(steps: list[Step], values: dict[str, str]) -> list[str]:
     return [f"{step}: {' → '.join(descs)}" for step, descs in lines.items()]
 
 
+def account_label(values: dict[str, str], side: str) -> str:
+    """「1113」または補助コードがあれば「1113-2」"""
+    code, sub = values.get(f"{side}科目コード", ""), values.get(f"{side}補助コード", "")
+    return f"{code}-{sub}" if sub else code
+
+
 def row_summary(row: Row) -> str:
     v = row.values
     return (f"CSV {row.line}行目  {row.date:%Y/%m/%d}  "
-            f"借方{v.get('借方科目コード', '')} / 貸方{v.get('貸方科目コード', '')}  "
+            f"借方{account_label(v, '借方')} / 貸方{account_label(v, '貸方')}  "
             f"{int(v['金額']):,}円  {v.get('取引先名', '')}  {v.get('摘要', '')}")
 
 
