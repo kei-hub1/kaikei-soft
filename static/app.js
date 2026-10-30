@@ -295,7 +295,7 @@ async function loadDescriptions() {
   ]);
   S.descriptions = presets;
   S.descriptionItems = sug.presets.concat(
-    sug.history.map(h => ({ id: null, code: '', text: h.text, kana: '', account_id: null, used: h.n })));
+    sug.history.map(h => ({ id: null, code: '', text: h.text, kana: h.kana || '', account_id: null, used: h.n })));
 }
 
 // ---------------------------------------------------------------- router

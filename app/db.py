@@ -140,6 +140,15 @@ CREATE TABLE IF NOT EXISTS descriptions (
 );
 CREATE INDEX IF NOT EXISTS idx_descriptions_client ON descriptions(client_id, sort_order);
 
+-- 摘要の読み (ひらがな)。仕訳入力で漢字に変換する前に打った読みを覚えておき、
+-- 次からは読みを打つだけで、その摘要を候補に出す (予測変換)。
+CREATE TABLE IF NOT EXISTS description_readings (
+  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  kana TEXT NOT NULL,
+  PRIMARY KEY (client_id, text)
+);
+
 CREATE TABLE IF NOT EXISTS entry_templates (
   id INTEGER PRIMARY KEY,
   client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,

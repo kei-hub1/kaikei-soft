@@ -429,15 +429,19 @@ def list_descriptions(client_id: int):
 def description_suggestions(client_id: int, limit: int = 300):
     """仕訳入力の摘要候補。プリセットを先に、過去に使った摘要を後に返す。"""
     with db() as conn:
+        # 読みはプリセットに登録したものを優先し、無ければ仕訳入力で覚えた読みを使う
         presets = conn.execute(
-            "SELECT id, code, text, kana, account_id FROM descriptions "
-            "WHERE client_id=? AND active=1 ORDER BY sort_order, code, text", (client_id,)).fetchall()
+            "SELECT d.id, d.code, d.text, COALESCE(NULLIF(d.kana,''), r.kana, '') AS kana, d.account_id "
+            "FROM descriptions d LEFT JOIN description_readings r ON r.client_id=d.client_id AND r.text=d.text "
+            "WHERE d.client_id=? AND d.active=1 ORDER BY d.sort_order, d.code, d.text", (client_id,)).fetchall()
         seen = {r["text"] for r in presets}
         used = conn.execute(
-            "SELECT l.description AS text, COUNT(*) AS n, MAX(e.entry_date) AS last_used "
-            "FROM journal_lines l JOIN journal_entries e ON e.id=l.entry_id "
-            "WHERE e.client_id=? AND l.description<>'' GROUP BY l.description "
-            "ORDER BY n DESC, last_used DESC LIMIT ?", (client_id, limit)).fetchall()
+            "SELECT u.text, u.n, u.last_used, COALESCE(r.kana, '') AS kana FROM ("
+            "  SELECT l.description AS text, COUNT(*) AS n, MAX(e.entry_date) AS last_used "
+            "  FROM journal_lines l JOIN journal_entries e ON e.id=l.entry_id "
+            "  WHERE e.client_id=? AND l.description<>'' GROUP BY l.description"
+            ") u LEFT JOIN description_readings r ON r.client_id=? AND r.text=u.text "
+            "ORDER BY u.n DESC, u.last_used DESC LIMIT ?", (client_id, client_id, limit)).fetchall()
         return {
             "presets": [dict(r) for r in presets],
             "history": [dict(r) for r in used if r["text"] not in seen],

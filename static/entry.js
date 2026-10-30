@@ -264,6 +264,8 @@ function createEntryForm(root, opts = {}) {
       credit_account_id: c.cr.id, credit_sub_id: c.crSub.id, credit_dept_id: c.crDept ? c.crDept.id : null,
       amount: amt,
       description: f('desc').value.trim(),
+      // 漢字に変換する前に打った読み。サーバーが覚えて、次から読みで候補に出す
+      description_kana: tr._descSuggest ? tr._descSuggest.reading() : '',
     };
   }
   /** いまの入力内容を、比較できる形にまとめる。
@@ -271,7 +273,7 @@ function createEntryForm(root, opts = {}) {
   function snapshot() {
     const lines = [];
     for (const tr of $$('tr', tbody)) {
-      const { empty, ...l } = lineData(tr);
+      const { empty, description_kana, ...l } = lineData(tr);   // 読みは内容の変化に数えない
       if (!empty) lines.push(l);
     }
     return JSON.stringify([currentDate, memoInput.value.trim(), lines]);
@@ -424,6 +426,8 @@ function createEntryForm(root, opts = {}) {
       }
       lastSaved = res;
       markSaved();
+      // 今登録した摘要 (と覚えた読み) を、すぐ次の入力から候補に出す
+      loadDescriptions().catch(() => {});
       if (!inDialog) {
         resetForm(true);
         dateInput.focus();

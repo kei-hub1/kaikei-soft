@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from datetime import date
 
+import re
+import unicodedata
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -25,6 +28,8 @@ class LineIn(BaseModel):
     credit_dept_id: int | None = None
     amount: int = Field(ge=0)
     description: str = ""
+    # 摘要を打ったときの読み (漢字に変換する前のかな)。予測変換の候補に使う。保存はしない
+    description_kana: str = ""
     # 消費税は扱わない (申告が必要な顧問先は別のソフトで処理する)。
     # 以前の画面・CSV・定型仕訳から tax_class などが送られてきても無視する。
 
@@ -102,6 +107,32 @@ def _insert_lines(conn, entry_id: int, lines: list[dict]) -> None:
           l["credit_dept_id"], l["amount"], l["description"])
          for i, l in enumerate(lines, 1)],
     )
+
+
+_KANA_ONLY = re.compile(r"^[ぁ-ゖー]+$")
+
+
+def to_hiragana(s: str) -> str:
+    """読みをそろえる: 半角カナ・全角英数を全角に、カタカナをひらがなに。空白は取る。"""
+    s = unicodedata.normalize("NFKC", s or "")
+    s = "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in s)
+    return re.sub(r"\s+", "", s)
+
+
+def learn_readings(conn, client_id: int, lines: list[LineIn]) -> None:
+    """摘要と、そのとき打った読みを覚える (次から読みで候補に出すため)。
+
+    読みがかなだけでできていて、摘要そのものと違う (= 変換した) ときだけ覚える。
+    """
+    for l in lines:
+        text = l.description.strip()
+        kana = to_hiragana(l.description_kana)
+        if not text or not kana or len(kana) > 100 or not _KANA_ONLY.match(kana):
+            continue
+        if kana == to_hiragana(text):
+            continue
+        conn.execute("INSERT INTO description_readings(client_id,text,kana) VALUES(?,?,?) "
+                     "ON CONFLICT(client_id,text) DO UPDATE SET kana=excluded.kana", (client_id, text, kana))
 
 
 def _next_voucher_no(conn, fy_id: int) -> int:
@@ -232,6 +263,7 @@ def create_entry(client_id: int, e: EntryIn):
             "INSERT INTO journal_entries(client_id,fiscal_year_id,entry_date,voucher_no,memo,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
             (client_id, fy["id"], e.entry_date, vno, e.memo, ts, ts))
         _insert_lines(conn, cur.lastrowid, v["lines"])
+        learn_readings(conn, client_id, e.lines)
         return _load_entries(conn, "e.id=?", [cur.lastrowid])[0]
 
 
@@ -253,6 +285,7 @@ def update_entry(entry_id: int, e: EntryIn):
                      (fy["id"], e.entry_date, vno, e.memo, now_iso(), entry_id))
         conn.execute("DELETE FROM journal_lines WHERE entry_id=?", (entry_id,))
         _insert_lines(conn, entry_id, v["lines"])
+        learn_readings(conn, row["client_id"], e.lines)
         return _load_entries(conn, "e.id=?", [entry_id])[0]
 
 

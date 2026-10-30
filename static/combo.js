@@ -12,6 +12,11 @@
  *   1. ↑↓ で候補を選んでいれば、その候補の本文
  *   2. 入力がプリセットのコードと完全一致すれば、その本文に展開
  *   3. それ以外は入力された文字列をそのまま使う
+ *
+ * 予測変換: 打った文字だけでなく、漢字に変換する前の読み (かな) でも候補を探す。
+ *   「でんき」と打った時点 (変換前) で「電気代」や通帳の「ﾃﾞﾝｷ ﾀﾞｲ」が候補に出る。
+ *   漢字の摘要は読みを知らないと探せないので、仕訳を登録したときに打った読みを
+ *   サーバーへ送って覚えさせる (reading())。次からはその読みで候補に出る。
  */
 function makeSuggest(input, options) {
   const wrap = document.createElement('div');
@@ -27,22 +32,43 @@ function makeSuggest(input, options) {
   let hl = -1;
   let navigated = false;
 
-  const norm = (s) => (s || '').toString().toLowerCase()
-    .replace(/[Ａ-Ｚａ-ｚ０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
-    .replace(/[ァ-ヶ]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0x60));
+  // 半角カナ・全角英数をそろえ、カタカナはひらがなにする。空白は無視する。
+  const norm = (s) => (s || '').toString().normalize('NFKC').toLowerCase()
+    .replace(/[ァ-ヶ]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0x60))
+    .replace(/\s+/g, '');
+  const isKana = (s) => /^[ぁ-ゖァ-ヺーｦ-ﾟ]+$/.test(s || '');
+
+  // ---- 読みの記録 ----
+  //   reading      : 確定済みの部分の読み (かな)。分からなくなったら null
+  //   readingValue : reading がどの入力内容に対応しているか。入力欄の値と食い違えば読みは不明
+  //   composing    : 変換中 (未確定) の読み
+  let reading = '';
+  let readingValue = '';
+  let composing = '';
+  let lastKana = '';
+  let compStartOk = false;
+  const readingOk = () => reading !== null && readingValue === input.value;
+  function setReading(r) { reading = r; readingValue = input.value; }
+  /** いま入力欄にある文字の読み (確定分 + 変換中)。分からなければ ''。 */
+  function currentReading() {
+    if (composing) return (compStartOk ? reading : '') + composing;
+    return readingOk() ? reading : '';
+  }
 
   function filter(q) {
     const all = options.items() || [];
     const related = new Set((options.accountIds ? options.accountIds() : []).filter(Boolean));
     const score = (it) => (it.account_id && related.has(it.account_id) ? 0 : 1);
     q = norm(q);
-    if (!q) return all.slice().sort((a, b) => score(a) - score(b)).slice(0, 60);
+    const r = norm(currentReading());
+    if (!q && !r) return all.slice().sort((a, b) => score(a) - score(b)).slice(0, 60);
+    const keys = [q, r].filter(Boolean);
     const starts = [], contains = [];
     for (const it of all) {
       const code = norm(it.code), text = norm(it.text), kana = norm(it.kana);
-      if (code && code === q) starts.unshift(it);
-      else if (code.startsWith(q) || text.startsWith(q) || kana.startsWith(q)) starts.push(it);
-      else if (text.includes(q) || kana.includes(q)) contains.push(it);
+      if (code && code === q) { starts.unshift(it); continue; }
+      if (keys.some(k => (code && code.startsWith(k)) || text.startsWith(k) || (kana && kana.startsWith(k)))) starts.push(it);
+      else if (keys.some(k => text.includes(k) || (kana && kana.includes(k)))) contains.push(it);
     }
     starts.sort((a, b) => score(a) - score(b));
     return starts.concat(contains).slice(0, 60);
@@ -62,22 +88,59 @@ function makeSuggest(input, options) {
   }
   function close() { dd.classList.remove('open'); dd.innerHTML = ''; filtered = []; hl = -1; navigated = false; }
 
+  /** 候補を選んだとき: 本文を入れ、読みは候補の読みに置き換える。 */
+  function choose(it) {
+    input.value = it.text;
+    setReading(it.kana ? norm(it.kana) : null);
+  }
+
   /** 確定後の文字列を返す (副作用として入力欄を書き換える)。 */
   function resolve() {
     if (navigated && hl >= 0 && filtered[hl]) {
-      input.value = filtered[hl].text;
+      choose(filtered[hl]);
     } else {
       const q = input.value.trim();
       const byCode = (options.items() || []).find(it => it.code && norm(it.code) === norm(q));
-      if (byCode) input.value = byCode.text;
+      if (byCode) choose(byCode);
     }
     close();
     return input.value;
   }
 
-  input.addEventListener('focus', () => selectAllOnFocus(input));
-  input.addEventListener('input', () => open(input.value));
+  input.addEventListener('focus', () => {
+    selectAllOnFocus(input);
+    if (!input.value) setReading('');
+  });
+  input.addEventListener('compositionstart', () => {
+    // 全体が選択された状態 (欄に入った直後) で打ち始めたら、前の内容は置き換わる
+    if (input.selectionStart === 0 && input.selectionEnd === input.value.length) { reading = ''; compStartOk = true; }
+    else compStartOk = readingOk();
+    composing = ''; lastKana = '';
+  });
+  input.addEventListener('compositionupdate', (e) => {
+    // 変換キーを押す前の、かなだけの状態を読みとして控える
+    if (isKana(e.data)) lastKana = e.data;
+    composing = lastKana;
+  });
+  input.addEventListener('compositionend', (e) => {
+    const got = lastKana || (isKana(e.data) ? e.data : '');
+    if (compStartOk && got) setReading(reading + got);
+    else setReading(null);
+    composing = ''; lastKana = '';
+    open(input.value);
+  });
+  input.addEventListener('input', (e) => {
+    if (!input.value) setReading('');
+    else if (e.isComposing || e.inputType === 'insertCompositionText') { /* 変換中は composition 側で扱う */ }
+    else if (e.inputType === 'insertText' && e.data) {           // 直接入力 (英数など)
+      if (input.value === e.data) setReading(e.data);
+      else if (reading !== null && readingValue + e.data === input.value) setReading(reading + e.data);
+      else setReading(null);
+    } else setReading(null);                     // 削除・貼り付けなど。読みは分からなくなる
+    open(input.value);
+  });
   input.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return;     // 変換中のキーは IME に任せる
     if (e.key === 'ArrowDown') {
       if (!dd.classList.contains('open')) open(input.value);
       else if (hl < filtered.length - 1) { hl++; navigated = true; renderDD(); }
@@ -101,13 +164,17 @@ function makeSuggest(input, options) {
     const row = e.target.closest('[data-i]');
     if (!row) return;
     e.preventDefault();
-    input.value = filtered[Number(row.dataset.i)].text;
+    choose(filtered[Number(row.dataset.i)]);
     close();
     input.focus();
     if (options.onChange) options.onChange();
   });
 
-  const api = { input, resolve, close, open: () => open(''), get isOpen() { return dd.classList.contains('open'); } };
+  const api = {
+    input, resolve, close, open: () => open(''), get isOpen() { return dd.classList.contains('open'); },
+    /** 入力欄の摘要の読み (かな)。打った読みが分からないときは ''。 */
+    reading() { return readingOk() && reading && isKana(reading) ? reading : ''; },
+  };
   input._suggest = api;
   return api;
 }

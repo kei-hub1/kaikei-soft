@@ -1320,3 +1320,38 @@ def test_autostart_reports_unsupported_outside_windows(client, monkeypatch):
     assert st["supported"] is False and "Windows" in st["problem"]
     r = client.put("/api/system/autostart", json={"enabled": True}, headers={"X-Kaikei-Local": "1"})
     assert r.status_code == 400
+
+
+def test_description_readings_are_learned_for_suggestions(client):
+    """摘要を漢字で登録したときに打った読みを覚え、候補に読みを添えて返す (予測変換用)。"""
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+
+    def post(desc, kana=""):
+        r = client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": d, "lines": [
+            {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["100"]["id"], "amount": 100,
+             "description": desc, "description_kana": kana}]})
+        assert r.status_code == 201, r.text
+        return r.json()
+
+    post("水道代", "スイドウダイ")          # カタカナで来てもひらがなにそろえる
+    post("ﾃﾞﾝｷ ﾀﾞｲ", "でんきだい")          # 摘要そのものが読みと同じなら覚えない
+    post("電話代", "でんわ代")              # かな以外が混じった読みは覚えない
+    e = post("ガス代", "がすだい")
+    # 修正で読みが変われば上書きする
+    client.put(f"/api/entries/{e['id']}", json={"entry_date": d, "lines": [
+        {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["100"]["id"], "amount": 100,
+         "description": "ガス代", "description_kana": "がすりょうきん"}]}).raise_for_status()
+    # 読みを送らない (CSV 取込など) 場合は、覚えた読みを消さない
+    post("水道代")
+
+    sug = client.get(f"/api/clients/{cl['id']}/description-suggestions").json()
+    kana = {h["text"]: h["kana"] for h in sug["history"]}
+    assert kana["水道代"] == "すいどうだい"
+    assert kana["ﾃﾞﾝｷ ﾀﾞｲ"] == "" and kana["電話代"] == ""
+    assert kana["ガス代"] == "がすりょうきん"
+
+    # 読みの無いプリセットにも、覚えた読みを添える
+    client.post(f"/api/clients/{cl['id']}/descriptions", json={"text": "水道代"}).raise_for_status()
+    sug = client.get(f"/api/clients/{cl['id']}/description-suggestions").json()
+    assert next(p for p in sug["presets"] if p["text"] == "水道代")["kana"] == "すいどうだい"
