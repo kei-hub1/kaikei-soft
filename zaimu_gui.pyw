@@ -29,7 +29,8 @@ LOG_FILE = RECORD_DIR / "入力ログ.txt"
 PREF_FILE = RECORD_DIR / "画面の設定.json"   # 前回のフォルダー・速さ
 TRACE_FILE = RECORD_DIR / "詳細ログ.txt"   # 送ったキー1つずつと、そのときの最前面のウィンドウ（ずれの調査用）
 # 速さの選択肢と、待ち時間の倍率（config.toml の [timing] と各手順の wait に掛ける）
-SPEEDS = {"ゆっくり（確認用）": 3.0, "標準": 1.0, "速い": 0.5, "とても速い": 0.25}
+SPEEDS = {"ゆっくり（確認用）": 3.0, "標準": 1.0, "速い": 0.5, "とても速い": 0.25, "最速": 0.12}
+SLOW = "ゆっくり（確認用）"   # この速さのときだけ詳細ログを残す（記録の分だけ遅くなるため）
 
 
 def progress_path(csv_path: Path, ym: tuple[int, int], practice: bool) -> Path:
@@ -74,7 +75,7 @@ class App:
         self.months: dict[str, tuple[int, int]] = {}
 
         root.title("財務エントリ 自動入力")
-        root.geometry("720x600")
+        root.geometry("800x600")
         root.minsize(600, 480)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -151,20 +152,25 @@ class App:
         speed = load_pref("speed")
         self.speed_var = tk.StringVar(value=speed if speed in SPEEDS else "標準")
         self.speed_box = ttk.Combobox(opts, textvariable=self.speed_var, values=list(SPEEDS),
-                                      state="readonly", width=16)
+                                      state="readonly", width=14)
         self.speed_box.bind("<<ComboboxSelected>>", lambda e: save_pref("speed", self.speed_var.get()))
         self.speed_box.pack(side="left", padx=(4, 0))
         self.each_var = tk.BooleanVar(value=False)
         self.each_chk = ttk.Checkbutton(opts, text="1件ごとに止めて確認する", variable=self.each_var)
         self.each_chk.pack(side="left", padx=(12, 0))
+        hide = load_pref("hide_while_running")
+        self.hide_var = tk.BooleanVar(value=True if hide is None else bool(hide))
+        self.hide_chk = ttk.Checkbutton(opts, text="入力中はこの画面をしまう", variable=self.hide_var,
+                                        command=lambda: save_pref("hide_while_running", self.hide_var.get()))
+        self.hide_chk.pack(side="left", padx=(12, 0))
         self.topmost_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opts, text="この画面を常に手前に表示", variable=self.topmost_var,
+        ttk.Checkbutton(opts, text="常に手前に表示", variable=self.topmost_var,
                         command=lambda: self.root.attributes("-topmost", self.topmost_var.get())).pack(
             side="left", padx=(12, 0))
         self.root.attributes("-topmost", True)
 
         self.inputs = [self.pick_btn, self.check_btn, self.practice_btn, self.start_btn,
-                       self.reset_btn, self.speed_box, self.each_chk, *self.tax_radios]
+                       self.reset_btn, self.speed_box, self.each_chk, self.hide_chk, *self.tax_radios]
 
     # ── 表示 ──
 
@@ -180,8 +186,14 @@ class App:
         self.log.configure(state="disabled")
 
     def post(self, text: str):
-        """入力中のスレッドから画面へ文字を送る。"""
+        """入力中のスレッドから画面へ文字を送る。止まったとき（■）は、しまっていた画面を出す。"""
         self.queue.put(("log", text))
+        if text.startswith("■"):
+            self.queue.put(("show", None))
+
+    def show_window(self):
+        self.root.deiconify()
+        self.root.lift()
 
     def poll_queue(self):
         try:
@@ -191,9 +203,12 @@ class App:
                     self.write(value)
                 elif kind == "status":
                     self.status_var.set(value)
+                elif kind == "show":
+                    self.show_window()
                 elif kind == "done":
                     self.set_running(False)
                     self.refresh_months()
+                    self.show_window()
         except queue.Empty:
             pass
         self.root.after(100, self.poll_queue)
@@ -384,7 +399,10 @@ class App:
         self.write("")
         self.status_var.set(f"{'メモ帳' if practice else '財務エントリ'}をクリックしてから PgUp を押してください")
         self.set_running(True)
-        options = dict(speed=SPEEDS[self.speed_var.get()], stop_each_row=self.each_var.get())
+        options = dict(speed=SPEEDS[self.speed_var.get()], stop_each_row=self.each_var.get(),
+                       trace_file=TRACE_FILE if self.speed_var.get() == SLOW else None)
+        if self.hide_var.get():
+            self.root.iconify()  # 入力中は画面をしまう（止まったとき・終わったときに出てくる）
         threading.Thread(target=self.worker, daemon=True,
                          args=(g["cfg"], target, rows, progress, practice, path, options)).start()
 
@@ -399,10 +417,11 @@ class App:
             try:
                 header = f"開始（{kind}）  {path}  {progress.month_label}  CSV {rows[0].line}行目から"
                 z.write_log(header, LOG_FILE)
-                z.write_log(f"──── {header}", TRACE_FILE)
+                if options["trace_file"]:
+                    z.write_log(f"──── {header}", options["trace_file"])
                 z.run_rows(rows, cfg, self.ctl, sender, progress, notify=self.post, log_file=LOG_FILE,
                            on_row_done=lambda n, t: self.queue.put(("status", f"入力中… {n}/{t}件 完了")),
-                           trace_file=TRACE_FILE, **options)
+                           **options)
             finally:
                 self.ctl.uninstall()
             self.post(f"\n✔ すべて入力しました（{len(rows)}件）。")
