@@ -26,9 +26,11 @@ LOG_FILE = BASE_DIR / "zaimu_input.log"
 # press に書けるキー名（pywinauto の send_keys の名前と同じ）
 KEY_NAMES = {
     "ENTER", "TAB", "ESC", "BACKSPACE", "DELETE", "SPACE",
-    "UP", "DOWN", "LEFT", "RIGHT", "HOME", "END",
+    "UP", "DOWN", "LEFT", "RIGHT", "HOME", "END", "PGUP", "PGDN",
     *(f"F{i}" for i in range(1, 13)),
 }
+# press のキー名と、停止・再開のキー（keyboard ライブラリの名前）の対応
+HOTKEY_NAMES = {"PGDN": "page down", "PGUP": "page up"}
 STEP_KEYS = {"name", "type", "paste", "press", "wait", "manual",
              "when_not_empty", "when_column", "when_in"}
 # send_keys で特別な意味を持つ文字（{} で囲んで送る）
@@ -528,6 +530,22 @@ class Controller:
     def uninstall(self):
         self.keyboard.unhook_all()
 
+    def is_hotkey(self, key: str) -> bool:
+        return HOTKEY_NAMES.get(key) in (self.pause_key, self.resume_key)
+
+    def send_hotkey_key(self, send):
+        """停止・再開と同じキー（例: PgDn）を財務エントリへ送る。
+
+        そのままだと自分で送ったキーで一時停止してしまい、キーも財務エントリに届かないため、
+        送る間だけ停止・再開のキーを外す。
+        """
+        self.uninstall()
+        try:
+            send()
+            time.sleep(0.05)
+        finally:
+            self.install()
+
     def _on_pause(self):
         if not self.paused:
             self.paused = True
@@ -650,8 +668,10 @@ class Runner:
             _, title, _ = self.ctl.win.foreground()
             write_log(f"{where}  {a.step:<12} {sent:<16} → 最前面:「{title}」", self.trace_file)
 
-    def perform(self, actions: list[Action], where: str):
+    def perform(self, actions: list[Action], where: str, wait_scale: float | None = None):
+        """wait_scale: wait の倍率。省略すると速さ（speed）に合わせる。"""
         ctl, sender = self.ctl, self.sender
+        wait_scale = self.speed if wait_scale is None else wait_scale
         for a in actions:
             ctl.position = f"{where}の「{a.step}」"
             if a.kind == "type":
@@ -664,7 +684,10 @@ class Runner:
                     time.sleep(self.key_interval)
             elif a.kind == "press":
                 ctl.checkpoint()
-                sender.press(a.value)
+                if ctl.is_hotkey(a.value):
+                    ctl.send_hotkey_key(lambda: sender.press(a.value))
+                else:
+                    sender.press(a.value)
                 self.trace(where, a, a.value)
                 time.sleep(self.key_interval)
             elif a.kind == "paste":
@@ -673,7 +696,7 @@ class Runner:
                 self.trace(where, a, f"「{a.value}」を貼り付け")
                 time.sleep(self.paste_wait)
             elif a.kind == "wait":
-                time.sleep(a.value * self.speed)
+                time.sleep(a.value * wait_scale)
             elif a.kind == "manual":
                 ctl.stop(f"手作業: {a.value}（{where}「{a.step}」）")
                 ctl.checkpoint()
@@ -688,7 +711,9 @@ class Runner:
                           f"カーソルを新しい行の「{first_field}」の欄に置いてから {self.ctl.resume_label} を押してください")
             self.ctl.checkpoint()
             return
-        self.perform(build_actions(self.cfg["month_switch"], month_switch_values(ym)), where)
+        # 画面が開くのを待つ時間は、速さを上げても短くしない（画面の切り替えは速くならないため）
+        self.perform(build_actions(self.cfg["month_switch"], month_switch_values(ym)), where,
+                     wait_scale=max(self.speed, 1.0))
 
     def run_rows(self, rows: list[Row], progress: Progress, notify=print, log_file: Path = LOG_FILE,
                  on_row_done=None, stop_each_row: bool = False):
