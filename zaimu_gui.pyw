@@ -26,9 +26,10 @@ import zaimu_input as z  # noqa: E402
 
 RECORD_DIR = BASE_DIR / "記録"          # どこまで入力したか・入力ログ（ツール側でまとめて持つ）
 LOG_FILE = RECORD_DIR / "入力ログ.txt"
-LAST_DIR_FILE = RECORD_DIR / "前回のフォルダー.json"
+PREF_FILE = RECORD_DIR / "画面の設定.json"   # 前回のフォルダー・速さ
 TRACE_FILE = RECORD_DIR / "詳細ログ.txt"   # 送ったキー1つずつと、そのときの最前面のウィンドウ（ずれの調査用）
-SLOW_SPEED = 3.0                          # 「ゆっくり入力する」のときの待ち時間の倍率
+# 速さの選択肢と、待ち時間の倍率（config.toml の [timing] と各手順の wait に掛ける）
+SPEEDS = {"ゆっくり（確認用）": 3.0, "標準": 1.0, "速い": 0.5, "とても速い": 0.25}
 
 
 def progress_path(csv_path: Path, ym: tuple[int, int], practice: bool) -> Path:
@@ -42,16 +43,21 @@ def ym_label(ym: tuple[int, int]) -> str:
     return f"{ym[0]}年{ym[1]}月"
 
 
-def load_last_dir() -> str | None:
+def load_pref(key: str):
     try:
-        return json.loads(LAST_DIR_FILE.read_text(encoding="utf-8")).get("dir")
+        return json.loads(PREF_FILE.read_text(encoding="utf-8")).get(key)
     except Exception:
         return None
 
 
-def save_last_dir(folder: Path):
+def save_pref(key: str, value):
     RECORD_DIR.mkdir(exist_ok=True)
-    LAST_DIR_FILE.write_text(json.dumps({"dir": str(folder)}, ensure_ascii=False), encoding="utf-8")
+    try:
+        prefs = json.loads(PREF_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        prefs = {}
+    prefs[key] = value
+    PREF_FILE.write_text(json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ─────────────────────────────────────────────
@@ -141,9 +147,13 @@ class App:
 
         opts = ttk.Frame(top)
         opts.grid(row=7, column=0, columnspan=3, sticky="ew", padx=6, pady=(4, 0))
-        self.slow_var = tk.BooleanVar(value=False)
-        self.slow_chk = ttk.Checkbutton(opts, text="ゆっくり入力する（動きの確認用）", variable=self.slow_var)
-        self.slow_chk.pack(side="left")
+        ttk.Label(opts, text="速さ").pack(side="left")
+        speed = load_pref("speed")
+        self.speed_var = tk.StringVar(value=speed if speed in SPEEDS else "標準")
+        self.speed_box = ttk.Combobox(opts, textvariable=self.speed_var, values=list(SPEEDS),
+                                      state="readonly", width=16)
+        self.speed_box.bind("<<ComboboxSelected>>", lambda e: save_pref("speed", self.speed_var.get()))
+        self.speed_box.pack(side="left", padx=(4, 0))
         self.each_var = tk.BooleanVar(value=False)
         self.each_chk = ttk.Checkbutton(opts, text="1件ごとに止めて確認する", variable=self.each_var)
         self.each_chk.pack(side="left", padx=(12, 0))
@@ -154,7 +164,7 @@ class App:
         self.root.attributes("-topmost", True)
 
         self.inputs = [self.pick_btn, self.check_btn, self.practice_btn, self.start_btn,
-                       self.reset_btn, self.slow_chk, self.each_chk, *self.tax_radios]
+                       self.reset_btn, self.speed_box, self.each_chk, *self.tax_radios]
 
     # ── 表示 ──
 
@@ -191,7 +201,8 @@ class App:
     def set_running(self, running: bool):
         self.running = running
         for w in self.inputs:
-            w.configure(state="disabled" if running else "normal")
+            idle = "readonly" if isinstance(w, ttk.Combobox) else "normal"
+            w.configure(state="disabled" if running else idle)
         self.cancel_btn.configure(state="normal" if running else "disabled")
 
     # ── 設定・ライブラリ ──
@@ -216,7 +227,7 @@ class App:
     # ── CSV・月 ──
 
     def pick_csv(self):
-        initial = str(self.csv.parent) if self.csv else load_last_dir()
+        initial = str(self.csv.parent) if self.csv else load_pref("dir")
         name = filedialog.askopenfilename(parent=self.root, title="通帳の CSV を選ぶ", initialdir=initial,
                                           filetypes=[("CSV ファイル", "*.csv"), ("すべてのファイル", "*.*")])
         if name:
@@ -228,7 +239,7 @@ class App:
             return
         self.csv = path
         self.csv_var.set(str(path))
-        save_last_dir(path.parent)
+        save_pref("dir", str(path.parent))
         self.clear_log()
         self.refresh_months()
         if self.months:
@@ -373,7 +384,7 @@ class App:
         self.write("")
         self.status_var.set(f"{'メモ帳' if practice else '財務エントリ'}をクリックしてから PgUp を押してください")
         self.set_running(True)
-        options = dict(speed=SLOW_SPEED if self.slow_var.get() else 1.0, stop_each_row=self.each_var.get())
+        options = dict(speed=SPEEDS[self.speed_var.get()], stop_each_row=self.each_var.get())
         threading.Thread(target=self.worker, daemon=True,
                          args=(g["cfg"], target, rows, progress, practice, path, options)).start()
 
