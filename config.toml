@@ -44,8 +44,9 @@ resume = "page up"    # PgUp: 開始・再開
 # "unicode" : 文字を直接送る（IME を通らないが、アプリによっては受け付けない）
 char_mode = "vk"
 # true にすると、type（数字などの入力）の直前に IME をオフにする。
-# 摘要の入力後に IME がオンのまま残り、次の行の数字が全角になってしまう場合に使う。
-ime_off_before_type = false
+# 取引先名・摘要の欄で IME がオンになるため、そのあとの数字が全角になり、
+# Enter が「変換の確定」に使われて欄がずれるのを防ぐ。
+ime_off_before_type = true
 
 # ─────────────────────────────────────────────
 # CSV
@@ -135,21 +136,23 @@ press = ["ENTER"]
 name = "取引金額"
 type = "{金額}"
 press = ["ENTER"]
+wait = 0.5          # 取引先名一覧が開くのを待つ
 
 [[steps]]
 name = "取引先名一覧 → 直接入力"
 type = "0"
-wait = 0.3
+wait = 0.5          # 取引先名一覧が閉じるのを待つ
 
 [[steps]]
 name = "取引先名"
 paste = "{取引先名}"
 press = ["ENTER"]
+wait = 0.5          # 元帳摘要一覧が開くのを待つ
 
 [[steps]]
 name = "元帳摘要一覧を閉じる"
 press = ["ENTER"]
-wait = 0.3
+wait = 0.5          # 元帳摘要一覧が閉じるのを待つ
 
 [[steps]]
 name = "元帳摘要"

@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import queue
 import sys
 import threading
@@ -26,6 +27,8 @@ import zaimu_input as z  # noqa: E402
 RECORD_DIR = BASE_DIR / "記録"          # どこまで入力したか・入力ログ（ツール側でまとめて持つ）
 LOG_FILE = RECORD_DIR / "入力ログ.txt"
 LAST_DIR_FILE = RECORD_DIR / "前回のフォルダー.json"
+TRACE_FILE = RECORD_DIR / "詳細ログ.txt"   # 送ったキー1つずつと、そのときの最前面のウィンドウ（ずれの調査用）
+SLOW_SPEED = 3.0                          # 「ゆっくり入力する」のときの待ち時間の倍率
 
 
 def progress_path(csv_path: Path, ym: tuple[int, int], practice: bool) -> Path:
@@ -119,6 +122,7 @@ class App:
         for b in (self.check_btn, self.practice_btn, self.start_btn, self.cancel_btn):
             b.pack(side="left", padx=4)
         self.reset_btn.pack(side="right", padx=4)
+        ttk.Button(btns, text="記録フォルダー", command=self.open_records).pack(side="right", padx=4)
 
         self.status_var = tk.StringVar(value="「CSV を選ぶ」を押してください")
         ttk.Label(top, textvariable=self.status_var, font=("", 11, "bold")).grid(
@@ -135,14 +139,22 @@ class App:
         self.log.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
 
+        opts = ttk.Frame(top)
+        opts.grid(row=7, column=0, columnspan=3, sticky="ew", padx=6, pady=(4, 0))
+        self.slow_var = tk.BooleanVar(value=False)
+        self.slow_chk = ttk.Checkbutton(opts, text="ゆっくり入力する（動きの確認用）", variable=self.slow_var)
+        self.slow_chk.pack(side="left")
+        self.each_var = tk.BooleanVar(value=False)
+        self.each_chk = ttk.Checkbutton(opts, text="1件ごとに止めて確認する", variable=self.each_var)
+        self.each_chk.pack(side="left", padx=(12, 0))
         self.topmost_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(top, text="この画面を常に手前に表示", variable=self.topmost_var,
-                        command=lambda: self.root.attributes("-topmost", self.topmost_var.get())).grid(
-            row=7, column=0, columnspan=3, sticky="w", padx=6, pady=(4, 0))
+        ttk.Checkbutton(opts, text="この画面を常に手前に表示", variable=self.topmost_var,
+                        command=lambda: self.root.attributes("-topmost", self.topmost_var.get())).pack(
+            side="left", padx=(12, 0))
         self.root.attributes("-topmost", True)
 
         self.inputs = [self.pick_btn, self.check_btn, self.practice_btn, self.start_btn,
-                       self.reset_btn, *self.tax_radios]
+                       self.reset_btn, self.slow_chk, self.each_chk, *self.tax_radios]
 
     # ── 表示 ──
 
@@ -361,10 +373,11 @@ class App:
         self.write("")
         self.status_var.set(f"{'メモ帳' if practice else '財務エントリ'}をクリックしてから PgUp を押してください")
         self.set_running(True)
+        options = dict(speed=SLOW_SPEED if self.slow_var.get() else 1.0, stop_each_row=self.each_var.get())
         threading.Thread(target=self.worker, daemon=True,
-                         args=(g["cfg"], target, rows, progress, practice, path)).start()
+                         args=(g["cfg"], target, rows, progress, practice, path, options)).start()
 
-    def worker(self, cfg, target, rows, progress, practice, path):
+    def worker(self, cfg, target, rows, progress, practice, path, options):
         kind = "練習" if practice else "本番"
         try:
             win = z.Win()
@@ -373,9 +386,12 @@ class App:
                                     quit_hint="自動入力の画面の「中止」ボタン")
             self.ctl.install()
             try:
-                z.write_log(f"開始（{kind}）  {path}  {progress.month_label}  CSV {rows[0].line}行目から", LOG_FILE)
+                header = f"開始（{kind}）  {path}  {progress.month_label}  CSV {rows[0].line}行目から"
+                z.write_log(header, LOG_FILE)
+                z.write_log(f"──── {header}", TRACE_FILE)
                 z.run_rows(rows, cfg, self.ctl, sender, progress, notify=self.post, log_file=LOG_FILE,
-                           on_row_done=lambda n, t: self.queue.put(("status", f"入力中… {n}/{t}件 完了")))
+                           on_row_done=lambda n, t: self.queue.put(("status", f"入力中… {n}/{t}件 完了")),
+                           trace_file=TRACE_FILE, **options)
             finally:
                 self.ctl.uninstall()
             self.post(f"\n✔ すべて入力しました（{len(rows)}件）。")
@@ -394,6 +410,13 @@ class App:
         finally:
             self.ctl = None
             self.queue.put(("done", None))
+
+    def open_records(self):
+        RECORD_DIR.mkdir(exist_ok=True)
+        if sys.platform == "win32":
+            os.startfile(RECORD_DIR)
+        else:
+            self.write(f"記録フォルダー: {RECORD_DIR}")
 
     def cancel(self):
         if self.ctl:

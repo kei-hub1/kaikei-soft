@@ -602,12 +602,25 @@ def ask_yes(prompt: str) -> bool:
 # ─────────────────────────────────────────────
 
 def run_rows(rows: list[Row], cfg: dict, ctl: Controller, sender: Sender, progress: Progress,
-             notify=print, log_file: Path = LOG_FILE, on_row_done=None):
+             notify=print, log_file: Path = LOG_FILE, on_row_done=None,
+             speed: float = 1.0, stop_each_row: bool = False, trace_file: Path | None = None):
+    """仕訳を順に入力する。
+
+    speed: 待ち時間の倍率（ゆっくり入力するときは 3 など）
+    stop_each_row: 1件入力するたびに一時停止する（画面を確かめてから PgUp で次へ）
+    trace_file: 送ったキーと、そのときの最前面のウィンドウを1つずつ書き残すファイル（ずれの調査用）
+    """
     timing = cfg.get("timing", {})
-    key_interval = timing.get("key_interval", 0.2)
-    paste_wait = timing.get("paste_wait", 0.3)
-    row_wait = timing.get("row_wait", 0.5)
+    key_interval = timing.get("key_interval", 0.2) * speed
+    paste_wait = timing.get("paste_wait", 0.3) * speed
+    row_wait = timing.get("row_wait", 0.5) * speed
     last_done = progress.last_completed
+
+    def trace(row: Row, a: Action, sent: str):
+        if trace_file:
+            time.sleep(0.05)  # キーを受けて画面（一覧ウィンドウなど）が変わるのを少し待ってから記録する
+            _, title, _ = ctl.win.foreground()
+            write_log(f"CSV {row.line}行目  {a.step:<12} {sent:<16} → 最前面:「{title}」", trace_file)
 
     for n, row in enumerate(rows, 1):
         notify(f"[{n}/{len(rows)}] {row_summary(row)}")
@@ -615,21 +628,25 @@ def run_rows(rows: list[Row], cfg: dict, ctl: Controller, sender: Sender, progre
         for a in build_actions(cfg["steps"], row.values):
             ctl.position = f"CSV {row.line}行目の「{a.step}」"
             if a.kind == "type":
-                sender.before_type()
-                for ch in a.value:
+                for i, ch in enumerate(a.value):
                     ctl.checkpoint()
+                    if i == 0:
+                        sender.before_type()  # 入力先を確かめてから IME をオフにする
                     sender.type_char(ch)
+                    trace(row, a, f"「{ch}」を打つ")
                     time.sleep(key_interval)
             elif a.kind == "press":
                 ctl.checkpoint()
                 sender.press(a.value)
+                trace(row, a, a.value)
                 time.sleep(key_interval)
             elif a.kind == "paste":
                 ctl.checkpoint()
                 sender.paste(a.value)
+                trace(row, a, f"「{a.value}」を貼り付け")
                 time.sleep(paste_wait)
             elif a.kind == "wait":
-                time.sleep(a.value)
+                time.sleep(a.value * speed)
             elif a.kind == "manual":
                 ctl.stop(f"手作業: {a.value}（CSV {row.line}行目「{a.step}」）")
                 ctl.checkpoint()
@@ -638,6 +655,9 @@ def run_rows(rows: list[Row], cfg: dict, ctl: Controller, sender: Sender, progre
         write_log(f"完了  {row_summary(row)}", log_file)
         if on_row_done:
             on_row_done(n, len(rows))
+        if stop_each_row and n < len(rows):
+            ctl.position = f"CSV {rows[n].line}行目"
+            ctl.stop(f"1件入力しました（CSV {row.line}行目）。財務エントリの画面を確かめ、よければ {ctl.resume_label} で次の仕訳へ")
         time.sleep(row_wait)
 
 
