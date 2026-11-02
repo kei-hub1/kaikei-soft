@@ -79,9 +79,18 @@ def load_config(path: Path) -> dict:
     except tomllib.TOMLDecodeError as e:
         raise UserError(f"設定ファイルの書き方に誤りがあります: {path}\n  {e}")
 
+    cfg["steps"] = parse_steps(cfg.get("steps", []), "steps")
+    if not cfg["steps"]:
+        raise UserError("設定ファイルに [[steps]] がありません")
+    cfg["month_switch"] = parse_steps(cfg.get("month_switch", []), "month_switch")
+    check_month_switch(cfg["month_switch"])
+    return cfg
+
+
+def parse_steps(raws: list[dict], section: str) -> list[Step]:
     steps = []
-    for i, raw in enumerate(cfg.get("steps", []), 1):
-        where = f"[[steps]] の {i} 番目（{raw.get('name', '名前なし')}）"
+    for i, raw in enumerate(raws, 1):
+        where = f"[[{section}]] の {i} 番目（{raw.get('name', '名前なし')}）"
         unknown = set(raw) - STEP_KEYS
         if unknown:
             raise UserError(f"{where}: 知らない項目があります: {', '.join(sorted(unknown))}")
@@ -94,10 +103,28 @@ def load_config(path: Path) -> dict:
         if bool(raw.get("when_column")) != bool(raw.get("when_in")):
             raise UserError(f"{where}: when_column と when_in は両方そろえて書いてください")
         steps.append(Step(name=raw.get("name", f"手順{i}"), **{k: v for k, v in raw.items() if k != "name"}))
-    if not steps:
-        raise UserError("設定ファイルに [[steps]] がありません")
-    cfg["steps"] = steps
-    return cfg
+    return steps
+
+
+# 月の切り替えの手順で使える値
+MONTH_SWITCH_FIELDS = {"年", "月", "前の月"}
+
+
+def month_switch_values(ym: tuple[int, int]) -> dict[str, str]:
+    """切り替え先の月（ym）の値。{月} は切り替え先の月、{前の月} は入力し終えた月。"""
+    prev = 12 if ym[1] == 1 else ym[1] - 1
+    return {"年": str(ym[0]), "月": str(ym[1]), "前の月": str(prev)}
+
+
+def check_month_switch(steps: list[Step]):
+    for step in steps:
+        for t in step.templates():
+            for f in template_fields(t):
+                if f not in MONTH_SWITCH_FIELDS:
+                    raise UserError(f"[[month_switch]]「{step.name}」の {{{f}}} は使えません"
+                                    f"（使えるのは {' '.join('{' + x + '}' for x in sorted(MONTH_SWITCH_FIELDS))}）")
+        if step.when_column or step.when_not_empty:
+            raise UserError(f"[[month_switch]]「{step.name}」には when_... の条件は書けません")
 
 
 # ─────────────────────────────────────────────
@@ -601,64 +628,93 @@ def ask_yes(prompt: str) -> bool:
 # 実行
 # ─────────────────────────────────────────────
 
-def run_rows(rows: list[Row], cfg: dict, ctl: Controller, sender: Sender, progress: Progress,
-             notify=print, log_file: Path = LOG_FILE, on_row_done=None,
-             speed: float = 1.0, stop_each_row: bool = False, trace_file: Path | None = None):
-    """仕訳を順に入力する。
+class Runner:
+    """操作（Action）を順に実行する。仕訳の入力と月の切り替えで共通。
 
     speed: 待ち時間の倍率（ゆっくり入力するときは 3 など）
-    stop_each_row: 1件入力するたびに一時停止する（画面を確かめてから PgUp で次へ）
     trace_file: 送ったキーと、そのときの最前面のウィンドウを1つずつ書き残すファイル（ずれの調査用）
     """
-    timing = cfg.get("timing", {})
-    key_interval = timing.get("key_interval", 0.2) * speed
-    paste_wait = timing.get("paste_wait", 0.3) * speed
-    row_wait = timing.get("row_wait", 0.5) * speed
-    last_done = progress.last_completed
 
-    def trace(row: Row, a: Action, sent: str):
-        if trace_file:
+    def __init__(self, cfg: dict, ctl: Controller, sender: Sender, speed: float = 1.0,
+                 trace_file: Path | None = None):
+        timing = cfg.get("timing", {})
+        self.cfg, self.ctl, self.sender = cfg, ctl, sender
+        self.speed, self.trace_file = speed, trace_file
+        self.key_interval = timing.get("key_interval", 0.2) * speed
+        self.paste_wait = timing.get("paste_wait", 0.3) * speed
+        self.row_wait = timing.get("row_wait", 0.5) * speed
+
+    def trace(self, where: str, a: Action, sent: str):
+        if self.trace_file:
             time.sleep(0.05)  # キーを受けて画面（一覧ウィンドウなど）が変わるのを少し待ってから記録する
-            _, title, _ = ctl.win.foreground()
-            write_log(f"CSV {row.line}行目  {a.step:<12} {sent:<16} → 最前面:「{title}」", trace_file)
+            _, title, _ = self.ctl.win.foreground()
+            write_log(f"{where}  {a.step:<12} {sent:<16} → 最前面:「{title}」", self.trace_file)
 
-    for n, row in enumerate(rows, 1):
-        notify(f"[{n}/{len(rows)}] {row_summary(row)}")
-        progress.save(last_done, row.line)
-        for a in build_actions(cfg["steps"], row.values):
-            ctl.position = f"CSV {row.line}行目の「{a.step}」"
+    def perform(self, actions: list[Action], where: str):
+        ctl, sender = self.ctl, self.sender
+        for a in actions:
+            ctl.position = f"{where}の「{a.step}」"
             if a.kind == "type":
                 for i, ch in enumerate(a.value):
                     ctl.checkpoint()
                     if i == 0:
                         sender.before_type()  # 入力先を確かめてから IME をオフにする
                     sender.type_char(ch)
-                    trace(row, a, f"「{ch}」を打つ")
-                    time.sleep(key_interval)
+                    self.trace(where, a, f"「{ch}」を打つ")
+                    time.sleep(self.key_interval)
             elif a.kind == "press":
                 ctl.checkpoint()
                 sender.press(a.value)
-                trace(row, a, a.value)
-                time.sleep(key_interval)
+                self.trace(where, a, a.value)
+                time.sleep(self.key_interval)
             elif a.kind == "paste":
                 ctl.checkpoint()
                 sender.paste(a.value)
-                trace(row, a, f"「{a.value}」を貼り付け")
-                time.sleep(paste_wait)
+                self.trace(where, a, f"「{a.value}」を貼り付け")
+                time.sleep(self.paste_wait)
             elif a.kind == "wait":
-                time.sleep(a.value * speed)
+                time.sleep(a.value * self.speed)
             elif a.kind == "manual":
-                ctl.stop(f"手作業: {a.value}（CSV {row.line}行目「{a.step}」）")
+                ctl.stop(f"手作業: {a.value}（{where}「{a.step}」）")
                 ctl.checkpoint()
-        last_done = row.line
-        progress.save(last_done, None)
-        write_log(f"完了  {row_summary(row)}", log_file)
-        if on_row_done:
-            on_row_done(n, len(rows))
-        if stop_each_row and n < len(rows):
-            ctl.position = f"CSV {rows[n].line}行目"
-            ctl.stop(f"1件入力しました（CSV {row.line}行目）。財務エントリの画面を確かめ、よければ {ctl.resume_label} で次の仕訳へ")
-        time.sleep(row_wait)
+
+    def switch_month(self, ym: tuple[int, int], first_field: str):
+        """財務エントリを ym の月に切り替える。[[month_switch]] がなければ、止まって手での切り替えを待つ。"""
+        where = f"{ym[1]}月分への切り替え"
+        if not self.cfg["month_switch"]:
+            self.ctl.position = where
+            prev = month_switch_values(ym)["前の月"]
+            self.ctl.stop(f"{prev}月分が終わりました。財務エントリを{ym[1]}月分に切り替え、"
+                          f"カーソルを新しい行の「{first_field}」の欄に置いてから {self.ctl.resume_label} を押してください")
+            self.ctl.checkpoint()
+            return
+        self.perform(build_actions(self.cfg["month_switch"], month_switch_values(ym)), where)
+
+    def run_rows(self, rows: list[Row], progress: Progress, notify=print, log_file: Path = LOG_FILE,
+                 on_row_done=None, stop_each_row: bool = False):
+        """仕訳を順に入力する。stop_each_row: 1件入力するたびに一時停止する（PgUp で次へ）。"""
+        ctl = self.ctl
+        last_done = progress.last_completed
+        for n, row in enumerate(rows, 1):
+            notify(f"[{n}/{len(rows)}] {row_summary(row)}")
+            progress.save(last_done, row.line)
+            self.perform(build_actions(self.cfg["steps"], row.values), f"CSV {row.line}行目")
+            last_done = row.line
+            progress.save(last_done, None)
+            write_log(f"完了  {row_summary(row)}", log_file)
+            if on_row_done:
+                on_row_done(n, len(rows))
+            if stop_each_row and n < len(rows):
+                ctl.position = f"CSV {rows[n].line}行目"
+                ctl.stop(f"1件入力しました（CSV {row.line}行目）。財務エントリの画面を確かめ、よければ {ctl.resume_label} で次の仕訳へ")
+            time.sleep(self.row_wait)
+
+
+def run_rows(rows: list[Row], cfg: dict, ctl: Controller, sender: Sender, progress: Progress,
+             notify=print, log_file: Path = LOG_FILE, on_row_done=None,
+             speed: float = 1.0, stop_each_row: bool = False, trace_file: Path | None = None):
+    """1か月分の仕訳を入力する（コマンド版から使う）。"""
+    Runner(cfg, ctl, sender, speed, trace_file).run_rows(rows, progress, notify, log_file, on_row_done, stop_each_row)
 
 
 def watch_window():

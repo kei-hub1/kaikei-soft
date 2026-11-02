@@ -75,7 +75,7 @@ class App:
         self.months: dict[str, tuple[int, int]] = {}
 
         root.title("財務エントリ 自動入力")
-        root.geometry("800x600")
+        root.geometry("800x630")
         root.minsize(600, 480)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -155,22 +155,30 @@ class App:
                                       state="readonly", width=14)
         self.speed_box.bind("<<ComboboxSelected>>", lambda e: save_pref("speed", self.speed_var.get()))
         self.speed_box.pack(side="left", padx=(4, 0))
+        cont = load_pref("continue_months")
+        self.continue_var = tk.BooleanVar(value=True if cont is None else bool(cont))
+        self.continue_chk = ttk.Checkbutton(opts, text="続けて次の月も入力する", variable=self.continue_var,
+                                            command=lambda: save_pref("continue_months", self.continue_var.get()))
+        self.continue_chk.pack(side="left", padx=(12, 0))
         self.each_var = tk.BooleanVar(value=False)
         self.each_chk = ttk.Checkbutton(opts, text="1件ごとに止めて確認する", variable=self.each_var)
         self.each_chk.pack(side="left", padx=(12, 0))
         hide = load_pref("hide_while_running")
         self.hide_var = tk.BooleanVar(value=True if hide is None else bool(hide))
-        self.hide_chk = ttk.Checkbutton(opts, text="入力中はこの画面をしまう", variable=self.hide_var,
+        opts2 = ttk.Frame(top)
+        opts2.grid(row=8, column=0, columnspan=3, sticky="ew", padx=6, pady=(2, 0))
+        self.hide_chk = ttk.Checkbutton(opts2, text="入力中はこの画面をしまう", variable=self.hide_var,
                                         command=lambda: save_pref("hide_while_running", self.hide_var.get()))
-        self.hide_chk.pack(side="left", padx=(12, 0))
+        self.hide_chk.pack(side="left")
         self.topmost_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opts, text="常に手前に表示", variable=self.topmost_var,
+        ttk.Checkbutton(opts2, text="常に手前に表示", variable=self.topmost_var,
                         command=lambda: self.root.attributes("-topmost", self.topmost_var.get())).pack(
             side="left", padx=(12, 0))
         self.root.attributes("-topmost", True)
 
         self.inputs = [self.pick_btn, self.check_btn, self.practice_btn, self.start_btn,
-                       self.reset_btn, self.speed_box, self.each_chk, self.hide_chk, *self.tax_radios]
+                       self.reset_btn, self.speed_box, self.continue_chk, self.each_chk, self.hide_chk,
+                       *self.tax_radios]
 
     # ── 表示 ──
 
@@ -303,13 +311,21 @@ class App:
 
     # ── 確認・入力 ──
 
+    def target_months(self) -> list[tuple[int, int]]:
+        """入力する月。「続けて次の月も入力する」なら、選んだ月から CSV の最後の月まで。"""
+        ym = self.selected_month()
+        if not ym:
+            return []
+        months = sorted(self.months.values())
+        return [m for m in months if m >= ym] if self.continue_var.get() else [ym]
+
     def gather(self) -> dict | None:
-        """選んだ CSV・月・消費税を確かめ、対象の仕訳とチェック結果を返す。"""
+        """選んだ CSV・月・消費税を確かめ、月ごとの対象の仕訳とチェック結果を返す。"""
         if not self.csv:
             messagebox.showwarning("自動入力", "「CSV を選ぶ」で CSV を選んでください。", parent=self.root)
             return None
-        ym = self.selected_month()
-        if not ym:
+        yms = self.target_months()
+        if not yms:
             messagebox.showwarning("自動入力", "入力する月を選んでください。", parent=self.root)
             return None
         tax = self.tax_var.get()
@@ -322,15 +338,24 @@ class App:
         except (z.UserError, UnicodeDecodeError) as e:
             messagebox.showerror("自動入力", str(e), parent=self.root)
             return None
-        rows = z.group_by_month(rows).get(ym, [])
-        more_errors, warnings = z.validate(rows, header, cfg)
-        return dict(cfg=cfg, path=self.csv, ym=ym, tax=tax, rows=rows,
-                    errors=errors + more_errors, warnings=warnings)
+        groups = z.group_by_month(rows)
+        months, warnings = [], []
+        for ym in yms:
+            month_rows = groups.get(ym, [])
+            more_errors, more_warnings = z.validate(month_rows, header, cfg)
+            errors += [f"{ym_label(ym)}: {e}" for e in more_errors]
+            warnings += [f"{ym_label(ym)}: {w}" for w in more_warnings]
+            months.append(dict(ym=ym, rows=month_rows))
+        return dict(cfg=cfg, path=self.csv, tax=tax, months=months, errors=errors, warnings=warnings)
 
     def report(self, g: dict) -> bool:
         """チェック結果を表示する。誤りがなければ True。"""
         self.clear_log()
-        self.write(f"CSV: {g['path'].name}　消費税: {g['tax']}　月: {ym_label(g['ym'])}　仕訳: {len(g['rows'])}件")
+        span = ym_label(g["months"][0]["ym"])
+        if len(g["months"]) > 1:
+            span += f"〜{ym_label(g['months'][-1]['ym'])}"
+        total = sum(len(m["rows"]) for m in g["months"])
+        self.write(f"CSV: {g['path'].name}　消費税: {g['tax']}　月: {span}　仕訳: {total}件")
         for w in g["warnings"]:
             self.write(f"！ {w}")
         if g["errors"]:
@@ -344,13 +369,22 @@ class App:
         g = self.gather()
         if not g or not self.report(g):
             return
-        self.write("\n入力する仕訳:")
-        for r in g["rows"]:
-            self.write(f"  {z.row_summary(r)}")
-        if g["rows"]:
+        for m in g["months"]:
+            self.write(f"\n{ym_label(m['ym'])}の仕訳:")
+            for r in m["rows"]:
+                self.write(f"  {z.row_summary(r)}")
+        first_rows = [m["rows"][0] for m in g["months"] if m["rows"]]
+        if first_rows:
             self.write("\n1件目の操作の順番:")
-            for line in z.plan_lines(g["cfg"]["steps"], g["rows"][0].values):
+            for line in z.plan_lines(g["cfg"]["steps"], first_rows[0].values):
                 self.write(f"  {line}")
+        if len(g["months"]) > 1:
+            self.write("\n月の切り替え:")
+            if g["cfg"]["month_switch"]:
+                for line in z.plan_lines(g["cfg"]["month_switch"], z.month_switch_values(g["months"][1]["ym"])):
+                    self.write(f"  {line}")
+            else:
+                self.write("  月の変わり目で一時停止します（手で次の月に切り替えてから PgUp）")
         self.write("\n問題ありません。（「確認」ではキーは送っていません）")
         self.status_var.set("確認しました")
 
@@ -366,22 +400,31 @@ class App:
                 messagebox.showerror("自動入力", "CSV に誤りがあるため入力できません。下の欄を見てください。",
                                      parent=self.root)
             return
-        path, ym = g["path"], g["ym"]
+        path = g["path"]
         csv_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        progress = z.Progress(progress_path(path, ym, practice), csv_hash, f"{ym[0]}-{ym[1]:02d}")
-        rows = [r for r in g["rows"] if r.line > progress.last_completed]
-        if not rows:
-            messagebox.showinfo("自動入力", f"{ym_label(ym)}の仕訳はすべて入力済みです。\n"
+        plan = []   # まだ入力していない仕訳がある月だけ
+        for m in g["months"]:
+            ym = m["ym"]
+            progress = z.Progress(progress_path(path, ym, practice), csv_hash, f"{ym[0]}-{ym[1]:02d}")
+            rows = [r for r in m["rows"] if r.line > progress.last_completed]
+            if rows:
+                plan.append(dict(ym=ym, rows=rows, progress=progress, done=len(m["rows"]) - len(rows)))
+        if not plan:
+            messagebox.showinfo("自動入力", "選んだ月の仕訳はすべて入力済みです。\n"
                                 "やり直すときは「この月の記録を消す」を押してください。", parent=self.root)
             return
 
-        first = "税区分" if g["tax"] == "課税" else "借方科目"
-        done = len(g["rows"]) - len(rows)
-        lines = [f"CSV：{path.name}",
-                 f"月：{ym_label(ym)}　消費税：{g['tax']}",
-                 f"入力する仕訳：{len(rows)}件" + (f"（入力済みの{done}件は飛ばします）" if done else "")]
-        if progress.in_progress:
-            lines += ["", f"※ 前回は CSV {progress.in_progress}行目の入力途中で終了しています。",
+        first_field = "税区分" if g["tax"] == "課税" else "借方科目"
+        first_ym = plan[0]["ym"]
+        lines = [f"CSV：{path.name}　消費税：{g['tax']}", ""]
+        for m in plan:
+            lines.append(f"{ym_label(m['ym'])}：{len(m['rows'])}件"
+                         + (f"（入力済みの{m['done']}件は飛ばします）" if m["done"] else ""))
+        if len(plan) > 1:
+            how = "自動で切り替えます" if g["cfg"]["month_switch"] else "一時停止します（手で切り替えて PgUp）"
+            lines += ["", f"月の変わり目では、財務エントリの月を{how}。"]
+        if plan[0]["progress"].in_progress:
+            lines += ["", f"※ 前回は CSV {plan[0]['progress'].in_progress}行目の入力途中で終了しています。",
                       "入力途中の行が残っていれば、先に手で消してください。"]
         if g["warnings"]:
             lines += ["", f"※ 注意が{len(g['warnings'])}件あります（下の欄を見てください）。"]
@@ -389,9 +432,9 @@ class App:
             lines += ["", "メモ帳を開いておいてください。", "",
                       "「はい」を押したら：", "1. メモ帳をクリック", "2. PgUp を押すと入力が始まります"]
         else:
-            lines += ["", f"財務エントリで、入力先の関与先の「会計伝票」（月次入力・{ym[1]}月分）を開いていますか？", "",
+            lines += ["", f"財務エントリで、入力先の関与先の「会計伝票」（月次入力・{first_ym[1]}月分）を開いていますか？", "",
                       "「はい」を押したら：", "1. 財務エントリの画面をクリック",
-                      f"2. カーソルを新しい行の「{first}」の欄に置く", "3. PgUp を押すと入力が始まります"]
+                      f"2. カーソルを新しい行の「{first_field}」の欄に置く", "3. PgUp を押すと入力が始まります"]
         if not messagebox.askyesno("メモ帳で練習" if practice else "入力開始", "\n".join(lines), parent=self.root):
             return
 
@@ -404,36 +447,49 @@ class App:
         if self.hide_var.get():
             self.root.iconify()  # 入力中は画面をしまう（止まったとき・終わったときに出てくる）
         threading.Thread(target=self.worker, daemon=True,
-                         args=(g["cfg"], target, rows, progress, practice, path, options)).start()
+                         args=(g["cfg"], target, plan, practice, path, first_field, options)).start()
 
-    def worker(self, cfg, target, rows, progress, practice, path, options):
+    def worker(self, cfg, target, plan, practice, path, first_field, options):
         kind = "練習" if practice else "本番"
+        current = plan[0]
         try:
             win = z.Win()
             sender = z.Sender(cfg, win)
             self.ctl = z.Controller(cfg, target, win, notify=self.post,
                                     quit_hint="自動入力の画面の「中止」ボタン")
+            runner = z.Runner(cfg, self.ctl, sender, options["speed"], options["trace_file"])
             self.ctl.install()
             try:
-                header = f"開始（{kind}）  {path}  {progress.month_label}  CSV {rows[0].line}行目から"
-                z.write_log(header, LOG_FILE)
-                if options["trace_file"]:
-                    z.write_log(f"──── {header}", options["trace_file"])
-                z.run_rows(rows, cfg, self.ctl, sender, progress, notify=self.post, log_file=LOG_FILE,
-                           on_row_done=lambda n, t: self.queue.put(("status", f"入力中… {n}/{t}件 完了")),
-                           **options)
+                for i, current in enumerate(plan):
+                    ym, rows, progress = current["ym"], current["rows"], current["progress"]
+                    if i > 0:
+                        self.post(f"\n── {ym[1]}月分に切り替えます")
+                        self.queue.put(("status", f"{ym[1]}月分に切り替え中…"))
+                        runner.switch_month(ym, first_field)
+                    header = f"開始（{kind}）  {path}  {progress.month_label}  CSV {rows[0].line}行目から"
+                    self.post(f"\n── {ym_label(ym)}（{len(rows)}件）")
+                    z.write_log(header, LOG_FILE)
+                    if options["trace_file"]:
+                        z.write_log(f"──── {header}", options["trace_file"])
+                    label = ym_label(ym)
+                    runner.run_rows(rows, progress, notify=self.post, log_file=LOG_FILE,
+                                    on_row_done=lambda n, t, label=label: self.queue.put(
+                                        ("status", f"{label} 入力中… {n}/{t}件 完了")),
+                                    stop_each_row=options["stop_each_row"])
+                    z.write_log(f"終了（{kind}）  {progress.month_label}  {len(rows)}件", LOG_FILE)
             finally:
                 self.ctl.uninstall()
-            self.post(f"\n✔ すべて入力しました（{len(rows)}件）。")
-            self.queue.put(("status", f"終了しました（{len(rows)}件）"))
-            z.write_log(f"終了（{kind}）  {len(rows)}件", LOG_FILE)
+            total = sum(len(m["rows"]) for m in plan)
+            self.post(f"\n✔ すべて入力しました（{len(plan)}か月・{total}件）。")
+            self.queue.put(("status", f"終了しました（{len(plan)}か月・{total}件）"))
         except z.Cancelled:
-            msg = f"中止しました。CSV {progress.last_completed}行目まで入力済みです。"
+            progress = current["progress"]
+            msg = f"中止しました。{ym_label(current['ym'])}は CSV {progress.last_completed}行目まで入力済みです。"
             if progress.in_progress:
                 msg += f"\n※ CSV {progress.in_progress}行目は入力途中です。財務エントリの画面で確認し、残っていれば消してください。"
             self.post("\n" + msg)
             self.queue.put(("status", "中止しました"))
-            z.write_log(f"中止（{kind}）  {progress.last_completed}行目まで完了", LOG_FILE)
+            z.write_log(f"中止（{kind}）  {progress.month_label}  {progress.last_completed}行目まで完了", LOG_FILE)
         except Exception:
             self.post("\nエラーで止まりました:\n" + traceback.format_exc())
             self.queue.put(("status", "エラーで止まりました"))
