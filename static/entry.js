@@ -66,6 +66,7 @@ function createEntryForm(root, opts = {}) {
       補助科目がある科目は確定すると候補が開くので <kbd>↑↓</kbd> と <kbd>Enter</kbd> で選択 (打たずに <kbd>Enter</kbd> でコード 1 の補助、空のままなら <kbd>Tab</kbd>) /
       <kbd>Shift</kbd> 単独で押して離すと行追加 (同じ伝票にまとめる) /
       2 行目以降は科目欄で空のまま <kbd>Enter</kbd> → 前の行と同じ科目 (空のまま進むときは <kbd>Tab</kbd>) /
+      資金諸口の行は取引先名・摘要も空のまま <kbd>Enter</kbd> → 上の行と同じ内容 /
       <kbd>Ctrl+Del</kbd> 行削除 / 摘要は <kbd>F4</kbd> または入力で候補表示、コード入力 + <kbd>Enter</kbd> で展開
       ${inDialog ? '/ <kbd>Esc</kbd> 保存して閉じる' : ''}
     </div>
@@ -178,6 +179,17 @@ function createEntryForm(root, opts = {}) {
         focusNext(amount);
       }
     });
+    // 資金諸口 (9991 など) を使う行で、取引先名・摘要を空欄のまま Enter を押したら、
+    // すぐ上の行と同じ内容を入れる。資金諸口で 1 つの取引を何行にも分けて書くとき、
+    // 同じ取引先名・摘要を打ち直さずに済むようにするため。
+    function fillFromAbove(input) {
+      if (input.value.trim()) return;
+      const ids = suspenseIds();
+      if (!ids.has(dr.id) && !ids.has(cr.id)) return;
+      const above = tr.previousElementSibling;
+      const v = above ? above.querySelector(`[data-f=${input.dataset.f}]`).value : '';
+      if (v) input.value = v;
+    }
     // 取引先名: 過去に使った取引先名から候補を出す (読みでも探せる)。候補に無い名前もそのまま入る
     const partner = f('partner');
     const partnerSuggest = makeSuggest(partner, { items: () => S.partnerItems || [] });
@@ -187,6 +199,7 @@ function createEntryForm(root, opts = {}) {
       if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) {
         e.preventDefault();
         partnerSuggest.resolve();
+        fillFromAbove(partner);
         focusNext(partner);
       } else if (e.key === 'F4') {
         e.preventDefault();
@@ -201,9 +214,11 @@ function createEntryForm(root, opts = {}) {
     });
     tr._descSuggest = descSuggest;
     desc.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;   // 変換の確定は IME に任せる
       if (e.key === 'Enter') {
         e.preventDefault();
         descSuggest.resolve();       // 候補を選んでいれば本文に、コード入力なら展開
+        fillFromAbove(desc);
         const rows = $$('tr', tbody);
         if (tr !== rows[rows.length - 1]) { focusNext(desc); return; }
         const t = computeTotals();
