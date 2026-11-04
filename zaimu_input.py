@@ -299,6 +299,35 @@ def validate(rows: list[Row], header: list[str], cfg: dict) -> tuple[list[str], 
 SIDES = (("借方", "借方科目コード", "借方補助コード"), ("貸方", "貸方科目コード", "貸方補助コード"))
 
 
+def bank_account(cfg: dict) -> str:
+    """通帳の口座の科目コード（普通預金）。"""
+    return str(cfg.get("passbook", {}).get("account", "1113"))
+
+
+def apply_sub_code(rows: list[Row], account: str, code: str) -> list[str]:
+    """画面で指定した補助コードを、account（普通預金）の行すべてに入れる。誤りの一覧を返す。
+
+    code が空なら「補助科目なし」として、CSV の補助コードもそのまま使う。
+    CSV に別の補助コードが書かれていたら、どちらが正しいか分からないため誤りとする。
+    """
+    code = code.strip()
+    if not code:
+        return []
+    if not code.isascii() or not code.isalnum():
+        return [f"普通預金の補助コード「{code}」は半角の英数字で入れてください"]
+    errors = []
+    for row in rows:
+        for side, code_col, sub_col in SIDES:
+            if row.values.get(code_col) != account:
+                continue
+            written = row.values.get(sub_col, "").strip()
+            if written and written != code:
+                errors.append(f"{row.line}行目: {side}補助コードが CSV では「{written}」、画面では「{code}」です。"
+                              f"CSV の補助コードを消すか、画面の補助コードを直してください")
+            row.values[sub_col] = code
+    return errors
+
+
 def check_sub_codes(rows: list[Row]) -> list[str]:
     """同じ科目で、補助コードがある行とない行が混ざっていないかを調べる。
 
@@ -763,6 +792,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="キーを送らず、送る予定の操作を表示するだけ")
     p.add_argument("--notepad", action="store_true", help="練習用: メモ帳に入力する")
     p.add_argument("--tax", choices=["課税", "免税"], default="課税", help="関与先の消費税（既定: 課税）")
+    p.add_argument("--sub-code", default="", help="普通預金の補助コード（CSV の普通預金の行すべてに入れる）")
     p.add_argument("--from-line", type=int, help="CSV のこの行番号から入力する（記録より優先）")
     p.add_argument("--reset", action="store_true", help="前回の記録を無視して最初から入力する")
     p.add_argument("--watch-window", action="store_true", help="最前面のウィンドウのタイトル等を表示するだけ")
@@ -779,6 +809,7 @@ def main(argv: list[str] | None = None) -> int:
         year, month = parse_month(args.month)
         month_label = f"{year}-{month:02d}" if year else f"{month:02d}"
         header, all_rows, errors = load_rows(args.csv, cfg, {"消費税": args.tax})
+        errors += apply_sub_code(all_rows, bank_account(cfg), args.sub_code)
         rows = filter_month(all_rows, year, month)
         # 日付を読めない行は、どの月か分からないため、月に関係なく誤りとする
         more_errors, warnings = validate(rows, header, cfg)

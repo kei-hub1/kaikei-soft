@@ -75,7 +75,7 @@ class App:
         self.months: dict[str, tuple[int, int]] = {}
 
         root.title("財務エントリ 自動入力")
-        root.geometry("800x630")
+        root.geometry("800x660")
         root.minsize(600, 480)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -111,16 +111,26 @@ class App:
             r.pack(side="left", padx=(0, 12))
             self.tax_radios.append(r)
 
-        ttk.Label(top, text="月").grid(row=2, column=0, sticky="nw", **pad)
+        ttk.Label(top, text="補助コード").grid(row=2, column=0, sticky="w", **pad)
+        subf = ttk.Frame(top)
+        subf.grid(row=2, column=1, columnspan=2, sticky="w", **pad)
+        # 関与先ごとに違うため、覚えておかない（前の関与先のコードを取り違えないように）
+        self.sub_var = tk.StringVar()
+        self.sub_entry = ttk.Entry(subf, textvariable=self.sub_var, width=8)
+        self.sub_entry.pack(side="left")
+        ttk.Label(subf, text="普通預金（1113）の補助コード。財務エントリで確かめて入れる。補助科目がない関与先は空欄").pack(
+            side="left", padx=(8, 0))
+
+        ttk.Label(top, text="月").grid(row=3, column=0, sticky="nw", **pad)
         self.month_tree = ttk.Treeview(top, columns=("month", "count", "state"), show="headings",
                                        height=6, selectmode="browse")
         for col, text, width in (("month", "月", 110), ("count", "件数", 60), ("state", "状態", 300)):
             self.month_tree.heading(col, text=text)
             self.month_tree.column(col, width=width, anchor="e" if col == "count" else "w")
-        self.month_tree.grid(row=2, column=1, columnspan=2, sticky="nsew", **pad)
+        self.month_tree.grid(row=3, column=1, columnspan=2, sticky="nsew", **pad)
 
         btns = ttk.Frame(top)
-        btns.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        btns.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         self.check_btn = ttk.Button(btns, text="確認", command=self.on_check)
         self.practice_btn = ttk.Button(btns, text="メモ帳で練習", command=lambda: self.start(True))
         self.start_btn = ttk.Button(btns, text="入力開始", command=lambda: self.start(False))
@@ -133,13 +143,13 @@ class App:
 
         self.status_var = tk.StringVar(value="「CSV を選ぶ」を押してください")
         ttk.Label(top, textvariable=self.status_var, font=("", 11, "bold")).grid(
-            row=4, column=0, columnspan=3, sticky="w", padx=6, pady=(4, 0))
+            row=5, column=0, columnspan=3, sticky="w", padx=6, pady=(4, 0))
         ttk.Label(top, text="入力中の操作：　PgDn ＝ 一時停止　／　PgUp ＝ 開始・再開").grid(
-            row=5, column=0, columnspan=3, sticky="w", padx=6)
+            row=6, column=0, columnspan=3, sticky="w", padx=6)
 
         logf = ttk.Frame(top)
-        logf.grid(row=6, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
-        top.rowconfigure(6, weight=1)
+        logf.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        top.rowconfigure(7, weight=1)
         self.log = tk.Text(logf, height=12, wrap="char", state="disabled")
         sb = ttk.Scrollbar(logf, command=self.log.yview)
         self.log.configure(yscrollcommand=sb.set)
@@ -147,7 +157,7 @@ class App:
         sb.pack(side="right", fill="y")
 
         opts = ttk.Frame(top)
-        opts.grid(row=7, column=0, columnspan=3, sticky="ew", padx=6, pady=(4, 0))
+        opts.grid(row=8, column=0, columnspan=3, sticky="ew", padx=6, pady=(4, 0))
         ttk.Label(opts, text="速さ").pack(side="left")
         speed = load_pref("speed")
         self.speed_var = tk.StringVar(value=speed if speed in SPEEDS else "標準")
@@ -166,7 +176,7 @@ class App:
         hide = load_pref("hide_while_running")
         self.hide_var = tk.BooleanVar(value=True if hide is None else bool(hide))
         opts2 = ttk.Frame(top)
-        opts2.grid(row=8, column=0, columnspan=3, sticky="ew", padx=6, pady=(2, 0))
+        opts2.grid(row=9, column=0, columnspan=3, sticky="ew", padx=6, pady=(2, 0))
         self.hide_chk = ttk.Checkbutton(opts2, text="入力中はこの画面をしまう", variable=self.hide_var,
                                         command=lambda: save_pref("hide_while_running", self.hide_var.get()))
         self.hide_chk.pack(side="left")
@@ -177,7 +187,7 @@ class App:
         self.root.attributes("-topmost", True)
 
         self.inputs = [self.pick_btn, self.check_btn, self.practice_btn, self.start_btn,
-                       self.reset_btn, self.speed_box, self.continue_chk, self.each_chk, self.hide_chk,
+                       self.reset_btn, self.sub_entry, self.speed_box, self.continue_chk, self.each_chk, self.hide_chk,
                        *self.tax_radios]
 
     # ── 表示 ──
@@ -335,6 +345,7 @@ class App:
         try:
             cfg = self.load_cfg()
             header, rows, errors = z.load_rows(self.csv, cfg, {"消費税": tax})
+            errors += z.apply_sub_code(rows, z.bank_account(cfg), self.sub_var.get())
         except (z.UserError, UnicodeDecodeError) as e:
             messagebox.showerror("自動入力", str(e), parent=self.root)
             return None
@@ -346,7 +357,8 @@ class App:
             errors += [f"{ym_label(ym)}: {e}" for e in more_errors]
             warnings += [f"{ym_label(ym)}: {w}" for w in more_warnings]
             months.append(dict(ym=ym, rows=month_rows))
-        return dict(cfg=cfg, path=self.csv, tax=tax, months=months, errors=errors, warnings=warnings)
+        return dict(cfg=cfg, path=self.csv, tax=tax, sub=self.sub_var.get().strip() or "なし",
+                    months=months, errors=errors, warnings=warnings)
 
     def report(self, g: dict) -> bool:
         """チェック結果を表示する。誤りがなければ True。"""
@@ -355,7 +367,8 @@ class App:
         if len(g["months"]) > 1:
             span += f"〜{ym_label(g['months'][-1]['ym'])}"
         total = sum(len(m["rows"]) for m in g["months"])
-        self.write(f"CSV: {g['path'].name}　消費税: {g['tax']}　月: {span}　仕訳: {total}件")
+        self.write(f"CSV: {g['path'].name}　消費税: {g['tax']}　普通預金の補助コード: {g['sub']}　"
+                   f"月: {span}　仕訳: {total}件")
         for w in g["warnings"]:
             self.write(f"！ {w}")
         if g["errors"]:
@@ -416,7 +429,7 @@ class App:
 
         first_field = "税区分" if g["tax"] == "課税" else "借方科目"
         first_ym = plan[0]["ym"]
-        lines = [f"CSV：{path.name}　消費税：{g['tax']}", ""]
+        lines = [f"CSV：{path.name}　消費税：{g['tax']}", f"普通預金の補助コード：{g['sub']}", ""]
         for m in plan:
             lines.append(f"{ym_label(m['ym'])}：{len(m['rows'])}件"
                          + (f"（入力済みの{m['done']}件は飛ばします）" if m["done"] else ""))
