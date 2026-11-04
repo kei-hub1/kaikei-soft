@@ -189,7 +189,7 @@ press = ["ENTER"]       # 「入力済みデータ年月の確認」の画面が
 wait = 2.5
 [[month_switch]]
 name = "入力済みデータ年月の確認"
-press = ["PGDN", "ENTER"]   # 1行下（次の月）を選んで Enter。「エントリ基本情報」が開く
+press = ["DOWN", "ENTER"]   # ↓キーで1行下（次の月）を選んで Enter。「エントリ基本情報」が開く
 wait = 2.5
 [[month_switch]]
 name = "エントリ基本情報"
