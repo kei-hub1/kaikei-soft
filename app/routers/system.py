@@ -7,7 +7,7 @@ import threading
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from .. import autostart
+from .. import autostart, backups
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -17,6 +17,28 @@ def _require_local(x_kaikei_local: str | None) -> None:
     # ブラウザは別サイトから独自ヘッダー付きで送る前に確認 (preflight) し、本ソフトはそれを許可しない。
     if x_kaikei_local != "1":
         raise HTTPException(403, "この操作は財務エントリの画面からのみ行えます")
+
+
+class RestoreIn(BaseModel):
+    name: str
+
+
+@router.get("/backups")
+def list_backups():
+    """data/backup にあるバックアップの一覧 (新しい順)。"""
+    return backups.list_backups()
+
+
+@router.post("/backups/restore")
+def restore_backup(body: RestoreIn, x_kaikei_local: str | None = Header(default=None)):
+    """バックアップの時点に戻す。戻す前の状態も自動でバックアップする (戻したことを取り消せるように)。"""
+    _require_local(x_kaikei_local)
+    try:
+        return backups.restore_backup(body.name)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 class AutostartIn(BaseModel):

@@ -1470,3 +1470,40 @@ def test_bulk_delete_entries_with_backup(client, tmp_path):
     client.post(f"/api/fiscal-years/{fy['id']}/close")
     r = client.post(f"/api/clients/{cl['id']}/entries/bulk-delete", json={"ids": [keep]})
     assert r.status_code == 409 and "締め切" in r.json()["detail"]
+
+
+def test_restore_backup_after_bulk_delete(client):
+    """まとめて削除した後、削除前のバックアップに戻せる。戻す前の状態もバックアップされる。"""
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+    ids = [client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": d, "lines": [
+        {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["111"]["id"], "amount": 100 + i}]}).json()["id"]
+        for i in range(3)]
+    r = client.post(f"/api/clients/{cl['id']}/entries/bulk-delete", json={"ids": ids}).json()
+    name = r["backup_name"]
+    assert _entries(client, fy) == []
+    # 削除の後に入力した仕訳 (戻すと消える)
+    client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": d, "lines": [
+        {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["111"]["id"], "amount": 9}]}).raise_for_status()
+
+    lst = client.get("/api/system/backups").json()
+    b = next(x for x in lst if x["name"] == name)
+    assert b["kind"] == "before_delete" and b["entries"] == 3 and b["clients"] == 1
+
+    h = {"X-Kaikei-Local": "1"}
+    assert client.post("/api/system/backups/restore", json={"name": name}).status_code == 403
+    assert client.post("/api/system/backups/restore", json={"name": "../kaikei.db"}, headers=h).status_code == 400
+    assert client.post("/api/system/backups/restore", json={"name": "kaikei_20000101_000000.db"}, headers=h).status_code == 404
+
+    r = client.post("/api/system/backups/restore", json={"name": name}, headers=h)
+    assert r.status_code == 200, r.text
+    assert sorted(e["id"] for e in _entries(client, fy)) == sorted(ids)
+    # 戻す前 (削除後 + 1 件) の状態も残っていて、そこへ戻し直せる
+    before = r.json()["backup"]
+    assert next(x for x in client.get("/api/system/backups").json() if x["name"] == before)["kind"] == "before_restore"
+    client.post("/api/system/backups/restore", json={"name": before}, headers=h).raise_for_status()
+    assert [e["lines"][0]["amount"] for e in _entries(client, fy)] == [9]
+
+    # 「バックアップをダウンロード」で作ったものも一覧に出る
+    assert client.get("/api/backup").status_code == 200
+    assert any(x["kind"] == "" for x in client.get("/api/system/backups").json())

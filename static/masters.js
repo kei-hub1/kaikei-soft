@@ -1231,6 +1231,42 @@ routes.clients = async function (main) {
   draw();
 };
 
+/** バックアップの時点に戻す (確認つき)。戻したら画面を読み込み直す。戻せたら true。 */
+async function restoreBackup(name, message) {
+  if (!(await confirmDialog(message))) return false;
+  try {
+    const r = await POST('/api/system/backups/restore', { name });
+    toast(`戻しました (戻す前の状態は ${r.backup} に保存しました)。画面を読み込み直します`);
+    setTimeout(() => location.reload(), 1200);
+    return true;
+  } catch (e) { showError(e); return false; }
+}
+
+/** データ管理画面の「バックアップから戻す」。 */
+function bindBackupPanel() {
+  const body = $('#bk-table tbody');
+  if (!body) return;
+  const stamp = (iso) => `${fmtDate(iso.slice(0, 10))} ${iso.slice(11, 19)}`;
+  GET('/api/system/backups').then((list) => {
+    body.innerHTML = list.map(b => `<tr>
+      <td class="code" style="white-space:nowrap">${esc(stamp(b.created))}</td>
+      <td>${esc(b.kind_label)}${b.error ? ` <span class="neg">${esc(b.error)}</span>` : ''}</td>
+      <td class="num">${b.entries === null ? '' : fmt(b.entries) + ' 件'}</td>
+      <td class="num">${b.clients === null ? '' : b.clients + ' 件'}</td>
+      <td>${b.error ? '' : `<button class="small" data-restore="${esc(b.name)}" data-when="${esc(stamp(b.created))}" data-kind="${esc(b.kind_label)}">この時点に戻す</button>`}</td>
+    </tr>`).join('') || '<tr><td colspan="5" class="empty">バックアップはまだありません</td></tr>';
+  }).catch(e => { body.innerHTML = `<tr><td colspan="5" class="neg">${esc(e.message)}</td></tr>`; });
+  body.onclick = (e) => {
+    const b = e.target.closest('[data-restore]');
+    if (!b) return;
+    restoreBackup(b.dataset.restore,
+      `${b.dataset.when} (${b.dataset.kind}) の時点に戻します。\n\n` +
+      '・全顧問先のデータがこの時点の状態になります。\n' +
+      '・この時点より後に入力・取り込み・修正した内容は消えます。\n' +
+      '・いまの状態も「バックアップから戻す前」として保存するので、あとでそこへ戻すこともできます。\n\nよろしいですか？');
+  };
+}
+
 /** データ管理画面の「PC 起動時の自動起動」と「終了」。 */
 function bindSystemPanel() {
   const st = $('#as-status');
@@ -1301,11 +1337,19 @@ routes.data = async function (main) {
         <span class="help" style="margin:0">更新 (update.bat) の前などに使います。</span></div>
     </div>
     <div class="panel"><h3 style="margin-top:0">バックアップ</h3>
-      <p>全データ (SQLite ファイル) をダウンロードします。復元するときは、サーバー停止後に <code>data/kaikei.db</code> をこのファイルで置き換えてください。</p>
+      <p>全データ (SQLite ファイル) をダウンロードします。ダウンロードしたものは下の一覧にも残ります。</p>
       <a class="btn" href="/api/backup">バックアップをダウンロード</a>
     </div>
+  </div>
+  <div class="panel"><h3 style="margin-top:0">バックアップから戻す (削除や取込の取り消し)</h3>
+    <p class="help" style="margin-top:0">仕訳をまとめて削除する前・ソフトを更新する前などに、自動でバックアップを作っています。
+      「この時点に戻す」を押すと、<b>全顧問先のデータ</b>がその時点の状態に戻ります。<b>その時点より後に入力・取り込み・修正した内容は消えます。</b><br>
+      戻す直前の状態も自動でバックアップするので、戻す時点を間違えたときは、一覧の「バックアップから戻す前」を選べばやり直せます。</p>
+    <div class="scroll-x" style="max-height:360px;overflow:auto"><table class="grid compact" id="bk-table"><thead><tr>
+      <th>日時</th><th>いつのバックアップか</th><th>仕訳</th><th>顧問先</th><th></th></tr></thead><tbody><tr><td colspan="5" class="empty">読み込んでいます...</td></tr></tbody></table></div>
   </div>`;
   bindSystemPanel();
+  bindBackupPanel();
   if (!hasClient) return;
 
   // この CSV をどの通帳 (補助科目) として取り込むか。

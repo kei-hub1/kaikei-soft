@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import csv
 import io
-import shutil
 from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 
+from ..backups import make_backup
 from ..db import db, get_db_path
 from ..master_data import (
     GROUP_MAP, GROUPS, ROLE_NAME_BY_CODE, ROLES, TKC_CORP_ONLY, TKC_SOLE_ONLY,
@@ -692,15 +692,7 @@ async def import_descriptions_csv(client_id: int, file: UploadFile, mode: str = 
 
 @router.get("/backup")
 def download_backup():
-    path = get_db_path()
-    if not path.exists():
+    if not get_db_path().exists():
         raise HTTPException(404, "データベースがありません")
-    # WAL 等を含めて整合の取れたコピーを作る
-    with db() as conn:
-        conn.execute("PRAGMA wal_checkpoint(FULL)")
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_dir = path.parent / "backup"
-    backup_dir.mkdir(exist_ok=True)
-    dst = backup_dir / f"kaikei_{stamp}.db"
-    shutil.copy2(path, dst)
+    dst = make_backup()          # data/backup にも残る (「バックアップから戻す」で選べる)
     return FileResponse(str(dst), media_type="application/octet-stream", filename=dst.name)

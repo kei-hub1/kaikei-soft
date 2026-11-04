@@ -72,6 +72,8 @@ routes.journal = async function (main, params) {
     左端のチェックで選ぶと、まとめて削除できます (<kbd>Shift</kbd> を押しながらで範囲選択)。</div>
   <div id="j-selbar" class="panel no-print" style="display:none;margin:4px 0;padding:6px 10px;border-color:var(--danger-border);background:var(--danger-bg)">
     <div class="row"><b id="j-selinfo"></b><button id="j-del" class="danger">選択した仕訳を削除</button><button id="j-unsel">選択を外す</button></div></div>
+  <div id="j-undo" class="panel no-print" style="display:none;margin:4px 0;padding:6px 10px;border-color:var(--warn-border);background:var(--warn-bg)">
+    <div class="row"><span id="j-undoinfo"></span><button id="j-undobtn" class="primary">削除を取り消す</button></div></div>
   <div class="scroll-x"><table class="grid compact sticky-head" id="j-table"><thead><tr>
     <th class="no-print" style="width:28px"><input type="checkbox" id="j-all" title="表示中の仕訳をすべて選択"></th><th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th><th>取引先名</th><th>摘要</th>
   </tr></thead><tbody></tbody></table></div></div>`;
@@ -179,7 +181,14 @@ routes.journal = async function (main, params) {
       '削除する前に、データ全体のバックアップを data\\backup フォルダーに自動で作ります。よろしいですか？'))) return;
     try {
       const r = await POST(`/api/clients/${S.client.id}/entries/bulk-delete`, { ids });
-      toast(`${r.deleted} 伝票を削除しました (削除前のバックアップ: ${r.backup.split(/[\\/]/).pop()})`);
+      toast(`${r.deleted} 伝票を削除しました`);
+      // 消しすぎたときにすぐ戻せるよう、取り消しボタンを出しておく
+      $('#j-undoinfo').textContent = `${r.deleted} 伝票を削除しました。間違えた場合は取り消せます。`;
+      $('#j-undo').style.display = '';
+      $('#j-undobtn').onclick = () => restoreBackup(r.backup_name,
+        `削除する前の状態に戻します。\n\n` +
+        '・削除した仕訳が元に戻ります。\n' +
+        '・削除した後に入力・取り込み・修正した内容 (全顧問先) は消えます。\n\nよろしいですか？');
       await loadDescriptions();
       await run();
     } catch (e) { showError(e); }

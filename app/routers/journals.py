@@ -7,15 +7,14 @@
 from __future__ import annotations
 
 import re
-import shutil
 import unicodedata
-from datetime import date, datetime
-from pathlib import Path
+from datetime import date
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ..db import db, get_db_path, now_iso
+from ..backups import make_backup
+from ..db import db, now_iso
 
 router = APIRouter(prefix="/api", tags=["journals"])
 
@@ -343,24 +342,12 @@ def delete_entries_bulk(client_id: int, body: BulkDeleteIn):
         closed = sorted({r["label"] for r in rows if r["closed"]})
         if closed:
             raise HTTPException(409, f"締め切られた会計期間 ({'、'.join(closed)}) の仕訳が含まれているため削除できません")
-    backup = _backup_db("before_delete")
+    backup = make_backup("before_delete")
     with db() as conn:
         for i in range(0, len(ids), 500):
             chunk = ids[i:i + 500]
             conn.execute(f"DELETE FROM journal_entries WHERE id IN ({','.join('?' * len(chunk))})", chunk)
-    return {"deleted": len(ids), "backup": str(backup)}
-
-
-def _backup_db(tag: str) -> Path:
-    """データベースを data/backup に複写して、その場所を返す。"""
-    path = get_db_path()
-    with db() as conn:
-        conn.execute("PRAGMA wal_checkpoint(FULL)")
-    backup_dir = path.parent / "backup"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    dst = backup_dir / f"kaikei_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{tag}.db"
-    shutil.copy2(path, dst)
-    return dst
+    return {"deleted": len(ids), "backup": str(backup), "backup_name": backup.name}
 
 
 @router.post("/clients/{client_id}/entries/bulk", status_code=201)
