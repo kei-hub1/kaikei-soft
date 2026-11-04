@@ -205,7 +205,7 @@ function modal(html, { onOpen, onClose, beforeClose } = {}) {
 }
 function confirmDialog(msg) {
   return new Promise((resolve) => {
-    const { close } = modal(`<h3>確認</h3><div>${esc(msg)}</div>
+    const { close } = modal(`<h3>確認</h3><div style="white-space:pre-line">${esc(msg)}</div>
       <div class="actions"><button data-cancel>キャンセル</button><button class="primary" data-ok>OK</button></div>`, {
       onOpen(bg) {
         $('[data-ok]', bg).focus();

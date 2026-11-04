@@ -37,7 +37,8 @@ function bindMonthSelect(id, onChange) {
 function printButton() { return `<button onclick="window.print()">印刷</button>`; }
 function csvButton(id) { return `<button id="${id}">CSV</button>`; }
 function tableToCsv(table, filename) {
-  const rows = $$('tr', table).map(tr => $$('th,td', tr).map(td => {
+  // 選択用のチェックボックス欄など、画面操作用の列 (no-print) は出力しない
+  const rows = $$('tr', table).map(tr => $$('th,td', tr).filter(td => !td.classList.contains('no-print')).map(td => {
     let t = td.textContent.trim().replace(/△/g, '-').replace(/,/g, '');
     if (td.classList.contains('num') && t === '') t = '0';
     return `"${t.replace(/"/g, '""')}"`;
@@ -59,15 +60,20 @@ routes.journal = async function (main, params) {
     ${periodToolbar('j', { from: params.from, to: params.to })}
     <div class="field"><span>科目</span><input id="j-acct" style="width:200px" placeholder="コード・かな・名称 (空欄で全科目)"></div>
     <div class="field"><span>摘要・取引先名で検索</span><input id="j-q" style="width:160px"></div>
+    <div class="field"><span>取引先名</span><select id="j-partner">
+      <option value="">(すべて)</option><option value="empty">空欄の仕訳だけ</option><option value="filled">入っている仕訳だけ</option></select></div>
     <div class="field"><span>並び順</span><select id="j-sort">
       <option value="date">日付順</option><option value="description">摘要順</option></select></div>
     <button id="j-run" class="primary">表示</button>
     ${printButton()} ${csvButton('j-csv')} ${backButtonHtml()}
   </div>
   <div class="panel"><div id="j-title"></div>
-  <div class="muted no-print" style="margin:2px 0 4px">行をクリックすると、その仕訳をこの画面のまま修正できます。修正画面から前後の仕訳へそのまま移れます。</div>
+  <div class="muted no-print" style="margin:2px 0 4px">行をクリックすると、その仕訳をこの画面のまま修正できます。修正画面から前後の仕訳へそのまま移れます。
+    左端のチェックで選ぶと、まとめて削除できます (<kbd>Shift</kbd> を押しながらで範囲選択)。</div>
+  <div id="j-selbar" class="panel no-print" style="display:none;margin:4px 0;padding:6px 10px;border-color:var(--danger-border);background:var(--danger-bg)">
+    <div class="row"><b id="j-selinfo"></b><button id="j-del" class="danger">選択した仕訳を削除</button><button id="j-unsel">選択を外す</button></div></div>
   <div class="scroll-x"><table class="grid compact sticky-head" id="j-table"><thead><tr>
-    <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th><th>取引先名</th><th>摘要</th>
+    <th class="no-print" style="width:28px"><input type="checkbox" id="j-all" title="表示中の仕訳をすべて選択"></th><th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th><th>取引先名</th><th>摘要</th>
   </tr></thead><tbody></tbody></table></div></div>`;
   // 開いた直後からコードを打てるよう、科目欄は入力欄 (コード・かな・名称で検索)
   // 科目を変えたら摘要の絞り込みは外す。前の科目に合わせて入れた摘要が
@@ -87,8 +93,11 @@ routes.journal = async function (main, params) {
     const qs = new URLSearchParams({ fiscal_year_id: S.fy.id, date_from: $('#j-from').value, date_to: $('#j-to').value, limit: 5000, sort });
     if (acctCombo.id) qs.set('account_id', acctCombo.id);
     if ($('#j-q').value.trim()) qs.set('q', $('#j-q').value.trim());
+    if ($('#j-partner').value) qs.set('partner', $('#j-partner').value);
     const r = await GET(`/api/clients/${S.client.id}/entries?${qs}`);
     shown = r.entries.map(e => e.id);      // 修正ダイアログで前後に移れるようにする
+    entryById = Object.fromEntries(r.entries.map(e => [e.id, e]));
+    selected.clear(); lastClicked = null;  // 表示し直したら選択は外す (見えていない仕訳を消さないため)
     $('#j-title').innerHTML = reportHeader('仕訳帳', `${fmtDate($('#j-from').value)} 〜 ${fmtDate($('#j-to').value)}　${r.total} 伝票${sort === 'description' ? '　摘要順' : ''}`);
     let total = 0;
     const rows = [];
@@ -96,7 +105,7 @@ routes.journal = async function (main, params) {
     let curDesc = null, grpDr = 0, grpCount = 0;
     const flush = () => {
       if (curDesc === null || !grpCount) return;
-      rows.push(`<tr class="subtotal"><td colspan="6">${esc(curDesc || '(摘要なし)')} 小計 (${grpCount} 行)</td>
+      rows.push(`<tr class="subtotal"><td class="no-print"></td><td colspan="6">${esc(curDesc || '(摘要なし)')} 小計 (${grpCount} 行)</td>
         <td class="num">${fmt(grpDr)}</td><td colspan="2"></td></tr>`);
       grpDr = 0; grpCount = 0;
     };
@@ -109,6 +118,7 @@ routes.journal = async function (main, params) {
         if (l.debit_account_id) { total += l.amount; grpDr += l.amount; }
         grpCount++;
         rows.push(`<tr class="clickable" data-id="${e.id}">
+          <td class="no-print center j-check">${i === 0 ? `<input type="checkbox" class="j-sel" data-id="${e.id}">` : ''}</td>
           <td class="code">${i === 0 ? fmtDate(e.entry_date) : ''}</td><td class="num">${i === 0 ? e.voucher_no : ''}</td>
           <td>${l.debit_code ? esc(l.debit_code + ' ' + l.debit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.debit_sub_name || '')}</td>
           <td>${l.credit_code ? esc(l.credit_code + ' ' + l.credit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.credit_sub_name || '')}</td>
@@ -117,16 +127,81 @@ routes.journal = async function (main, params) {
       });
     }
     flush();
-    rows.push(`<tr class="total"><td colspan="6">合計</td><td class="num">${fmt(total)}</td><td colspan="2"></td></tr>`);
+    rows.push(`<tr class="total"><td class="no-print"></td><td colspan="6">合計</td><td class="num">${fmt(total)}</td><td colspan="2"></td></tr>`);
     $('#j-table tbody').innerHTML = rows.join('');
+    drawSelection();
   }
+
+  // ---- まとめて削除 ----
+  let entryById = {};
+  const selected = new Set();
+  let lastClicked = null;
+  function entryTotal(e) { return e.lines.filter(l => l.debit_account_id).reduce((a, l) => a + l.amount, 0); }
+  function drawSelection() {
+    $$('#j-table .j-sel').forEach(c => {
+      c.checked = selected.has(Number(c.dataset.id));
+      c.closest('tr').classList.toggle('selected', c.checked);
+    });
+    const all = $('#j-all');
+    all.checked = shown.length > 0 && selected.size === shown.length;
+    all.indeterminate = selected.size > 0 && selected.size < shown.length;
+    const bar = $('#j-selbar');
+    bar.style.display = selected.size ? '' : 'none';
+    if (selected.size) {
+      const total = [...selected].reduce((a, id) => a + entryTotal(entryById[id]), 0);
+      $('#j-selinfo').textContent = `${selected.size} 伝票を選択中 (合計 ${fmt(total)} 円)`;
+    }
+  }
+  function toggle(id, on, range) {
+    if (range && lastClicked !== null) {
+      // Shift を押しながら: 前にクリックした伝票からここまでをまとめて同じ状態にする
+      const a = shown.indexOf(lastClicked), b = shown.indexOf(id);
+      if (a >= 0 && b >= 0) {
+        for (const x of shown.slice(Math.min(a, b), Math.max(a, b) + 1)) on ? selected.add(x) : selected.delete(x);
+      }
+    } else on ? selected.add(id) : selected.delete(id);
+    lastClicked = id;
+    drawSelection();
+  }
+  $('#j-all').onchange = () => {
+    if ($('#j-all').checked) shown.forEach(id => selected.add(id)); else selected.clear();
+    drawSelection();
+  };
+  $('#j-unsel').onclick = () => { selected.clear(); drawSelection(); };
+  $('#j-del').onclick = async () => {
+    const ids = shown.filter(id => selected.has(id));
+    if (!ids.length) return;
+    const es = ids.map(id => entryById[id]);
+    const dates = es.map(e => e.entry_date).sort();
+    const total = es.reduce((a, e) => a + entryTotal(e), 0);
+    const range = dates[0] === dates[dates.length - 1] ? fmtDate(dates[0]) : `${fmtDate(dates[0])} 〜 ${fmtDate(dates[dates.length - 1])}`;
+    if (!(await confirmDialog(`選択した ${ids.length} 伝票 (${range}、合計 ${fmt(total)} 円) を削除します。\n` +
+      '削除する前に、データ全体のバックアップを data\\backup フォルダーに自動で作ります。よろしいですか？'))) return;
+    try {
+      const r = await POST(`/api/clients/${S.client.id}/entries/bulk-delete`, { ids });
+      toast(`${r.deleted} 伝票を削除しました (削除前のバックアップ: ${r.backup.split(/[\\/]/).pop()})`);
+      await loadDescriptions();
+      await run();
+    } catch (e) { showError(e); }
+  };
+
   $('#j-run').onclick = run;
+  $('#j-partner').onchange = run;
   $('#j-sort').onchange = run;
   $('#j-q').onkeydown = (e) => { if (e.key === 'Enter') run(); };
   bindMonthSelect('j', run);
   $('#j-csv').onclick = () => tableToCsv($('#j-table'), `仕訳帳_${S.client.code}.csv`);
   // 行をクリックしたら、その場で修正できるダイアログを開く
   $('#j-table').addEventListener('click', (e) => {
+    // チェック欄のクリックは選択だけ (修正画面は開かない)
+    const cell = e.target.closest('td.j-check');
+    if (cell) {
+      const box = cell.querySelector('.j-sel');
+      if (!box) return;
+      if (e.target !== box) box.checked = !box.checked;
+      toggle(Number(box.dataset.id), box.checked, e.shiftKey);
+      return;
+    }
     const tr = e.target.closest('tr[data-id]');
     if (tr) openEntryDialog(Number(tr.dataset.id), { onChanged: run, siblings: shown });
   });

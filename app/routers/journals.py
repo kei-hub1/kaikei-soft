@@ -6,15 +6,16 @@
 """
 from __future__ import annotations
 
-from datetime import date
-
 import re
+import shutil
 import unicodedata
+from datetime import date, datetime
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ..db import db, now_iso
+from ..db import db, get_db_path, now_iso
 
 router = APIRouter(prefix="/api", tags=["journals"])
 
@@ -211,6 +212,7 @@ def list_entries(
     sub_id: int | None = None,
     q: str | None = None,
     description: str | None = None,
+    partner: str | None = None,
     sort: str = "date",
     limit: int = Query(default=500, le=5000),
     offset: int = 0,
@@ -237,6 +239,13 @@ def list_entries(
         where.append("(e.memo LIKE ? OR EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id=e.id "
                      "AND (l.description LIKE ? OR l.partner LIKE ?)))")
         params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+    if partner == "empty":
+        # 取引先名がどの行にも入っていない伝票 (取引先名の項目ができる前に取り込んだものなど)
+        where.append("NOT EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id=e.id AND l.partner<>'')")
+    elif partner == "filled":
+        where.append("EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id=e.id AND l.partner<>'')")
+    elif partner:
+        raise HTTPException(400, "partner は empty / filled のいずれか")
     if description:
         # 摘要の完全一致 (同じ摘要の取引だけを抜き出す)
         where.append("EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id=e.id AND l.description=?)")
@@ -305,6 +314,53 @@ def delete_entry(entry_id: int):
         if fy and fy["closed"]:
             raise HTTPException(409, "この会計期間は締め切られています")
         conn.execute("DELETE FROM journal_entries WHERE id=?", (entry_id,))
+
+
+class BulkDeleteIn(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=20000)
+
+
+@router.post("/clients/{client_id}/entries/bulk-delete")
+def delete_entries_bulk(client_id: int, body: BulkDeleteIn):
+    """選んだ仕訳をまとめて削除する。
+
+    取り返しがつかないので、消す前にデータベース全体を data/backup へ複写しておく。
+    1 件でも締め切った会計期間の仕訳や、別の顧問先の仕訳が混じっていれば、何も消さない。
+    """
+    ids = sorted(set(body.ids))
+    with db() as conn:
+        rows = []
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            rows += conn.execute(
+                f"SELECT e.id, e.client_id, f.closed, f.label FROM journal_entries e "
+                f"JOIN fiscal_years f ON f.id=e.fiscal_year_id WHERE e.id IN ({','.join('?' * len(chunk))})",
+                chunk).fetchall()
+        if len(rows) != len(ids):
+            raise HTTPException(404, f"見つからない仕訳が {len(ids) - len(rows)} 件あります。画面を表示し直してください")
+        if any(r["client_id"] != client_id for r in rows):
+            raise HTTPException(400, "別の顧問先の仕訳が含まれています")
+        closed = sorted({r["label"] for r in rows if r["closed"]})
+        if closed:
+            raise HTTPException(409, f"締め切られた会計期間 ({'、'.join(closed)}) の仕訳が含まれているため削除できません")
+    backup = _backup_db("before_delete")
+    with db() as conn:
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            conn.execute(f"DELETE FROM journal_entries WHERE id IN ({','.join('?' * len(chunk))})", chunk)
+    return {"deleted": len(ids), "backup": str(backup)}
+
+
+def _backup_db(tag: str) -> Path:
+    """データベースを data/backup に複写して、その場所を返す。"""
+    path = get_db_path()
+    with db() as conn:
+        conn.execute("PRAGMA wal_checkpoint(FULL)")
+    backup_dir = path.parent / "backup"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    dst = backup_dir / f"kaikei_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{tag}.db"
+    shutil.copy2(path, dst)
+    return dst
 
 
 @router.post("/clients/{client_id}/entries/bulk", status_code=201)

@@ -1430,3 +1430,43 @@ def test_partner_on_entries_templates_and_suggestions(client):
          "partner": "大家さん", "description": "家賃"}]})
     assert r.status_code == 201, r.text
     assert r.json()["lines"][0]["partner"] == "大家さん"
+
+
+def test_bulk_delete_entries_with_backup(client, tmp_path):
+    """選んだ仕訳をまとめて削除する。削除前にバックアップを作る。取引先名が空の仕訳で絞り込める。"""
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+    old = [client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": d, "lines": [
+        {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["111"]["id"], "amount": 100 + i,
+         "description": "振込"}]}).json()["id"] for i in range(3)]
+    keep = client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": d, "lines": [
+        {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["111"]["id"], "amount": 100,
+         "partner": "ﾔﾏﾀﾞ", "description": "振込"}]}).json()["id"]
+
+    lst = client.get(f"/api/clients/{cl['id']}/entries", params={"partner": "empty"}).json()
+    assert sorted(e["id"] for e in lst["entries"]) == sorted(old)
+    assert [e["id"] for e in client.get(f"/api/clients/{cl['id']}/entries", params={"partner": "filled"}).json()["entries"]] == [keep]
+
+    # 別の顧問先の仕訳や存在しない仕訳が混じっていたら、何も消さない
+    cl2, fy2, acc2 = make_client(client, code="002")
+    other = client.post(f"/api/clients/{cl2['id']}/entries", json={"entry_date": fy2["start_date"], "lines": [
+        {"debit_account_id": acc2["617"]["id"], "credit_account_id": acc2["111"]["id"], "amount": 1}]}).json()["id"]
+    assert client.post(f"/api/clients/{cl['id']}/entries/bulk-delete", json={"ids": old + [other]}).status_code == 400
+    assert client.post(f"/api/clients/{cl['id']}/entries/bulk-delete", json={"ids": old + [999999]}).status_code == 404
+    assert client.post(f"/api/clients/{cl['id']}/entries/bulk-delete", json={"ids": []}).status_code == 422
+
+    r = client.post(f"/api/clients/{cl['id']}/entries/bulk-delete", json={"ids": old})
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] == 3
+    from pathlib import Path
+    backup = Path(r.json()["backup"])
+    assert backup.exists() and backup.parent.name == "backup" and "before_delete" in backup.name
+    # バックアップには削除前の仕訳が残っている
+    import sqlite3
+    assert sqlite3.connect(backup).execute("SELECT COUNT(*) FROM journal_entries").fetchone()[0] == 5
+    assert [e["id"] for e in _entries(client, fy)] == [keep]
+
+    # 締め切った期間の仕訳は消さない
+    client.post(f"/api/fiscal-years/{fy['id']}/close")
+    r = client.post(f"/api/clients/{cl['id']}/entries/bulk-delete", json={"ids": [keep]})
+    assert r.status_code == 409 and "締め切" in r.json()["detail"]
