@@ -59,6 +59,7 @@ routes.journal = async function (main, params) {
   <div class="toolbar no-print">
     ${periodToolbar('j', { from: params.from, to: params.to })}
     <div class="field"><span>科目</span><input id="j-acct" style="width:200px" placeholder="コード・かな・名称 (空欄で全科目)"></div>
+    <div class="field"><span>補助科目</span><input id="j-sub" style="width:160px" placeholder="(すべて)"></div>
     <div class="field"><span>摘要・取引先名で検索</span><input id="j-q" style="width:160px"></div>
     <div class="field"><span>取引先名</span><select id="j-partner">
       <option value="">(すべて)</option><option value="empty">空欄の仕訳だけ</option><option value="filled">入っている仕訳だけ</option></select></div>
@@ -80,27 +81,51 @@ routes.journal = async function (main, params) {
   // 開いた直後からコードを打てるよう、科目欄は入力欄 (コード・かな・名称で検索)
   // 科目を変えたら摘要の絞り込みは外す。前の科目に合わせて入れた摘要が
   // 残っていると、新しい科目では 1 件も出ない、ということが起きるため。
+  // 補助科目は、選んだ科目に補助科目があるときだけ選べる。空欄なら科目の全部を出す。
+  const subItems = () => (acctCombo && acctCombo.id ? (S.subsByAccount[acctCombo.id] || []) : []);
+  const subCombo = makeCombo($('#j-sub'), {
+    items: subItems,
+    openOnFocus: true,
+    onChange: () => run(),
+    onCommit: () => { if ((subCombo.id || null) !== ranSub) run(); $('#j-sub').select(); },
+  });
+  // 打って消しただけ (候補を選ばずに空欄にした) ときも、欄を離れたら表示し直す
+  $('#j-sub').addEventListener('blur', () => setTimeout(() => { if ((subCombo.id || null) !== ranSub) run(); }, 200));
+  function updateSubState() {
+    const has = subItems().some(x => x.active);
+    $('#j-sub').disabled = !has;
+    $('#j-sub').placeholder = has ? '(すべて)' : '';
+  }
   const acctCombo = makeCombo($('#j-acct'), {
     items: () => S.accounts,
-    onChange: () => { $('#j-q').value = ''; run(); },
-    onCommit: () => { $('#j-acct').select(); },
+    onChange: () => { $('#j-q').value = ''; subCombo.clear(); updateSubState(); run(); },
+    // 補助科目がある科目なら、続けて補助科目を選べるよう補助科目欄へ移る
+    onCommit: () => { if (!$('#j-sub').disabled) $('#j-sub').focus(); else $('#j-acct').select(); },
   });
   if (params.account) acctCombo.set(Number(params.account));
+  updateSubState();
+  if (params.sub && !$('#j-sub').disabled) subCombo.set(Number(params.sub));
   if (params.q) $('#j-q').value = params.q;
   if (params.sort) $('#j-sort').value = params.sort;
 
   let shown = [];                          // いま表示している伝票 id (表示順)
+  let ranSub = null;                       // 表示中の一覧を出したときの補助科目
   async function run() {
     const sort = $('#j-sort').value;
+    ranSub = (acctCombo.id && subCombo.id) || null;
     const qs = new URLSearchParams({ fiscal_year_id: S.fy.id, date_from: $('#j-from').value, date_to: $('#j-to').value, limit: 5000, sort });
     if (acctCombo.id) qs.set('account_id', acctCombo.id);
+    if (acctCombo.id && subCombo.id) qs.set('sub_id', subCombo.id);
     if ($('#j-q').value.trim()) qs.set('q', $('#j-q').value.trim());
     if ($('#j-partner').value) qs.set('partner', $('#j-partner').value);
     const r = await GET(`/api/clients/${S.client.id}/entries?${qs}`);
     shown = r.entries.map(e => e.id);      // 修正ダイアログで前後に移れるようにする
     entryById = Object.fromEntries(r.entries.map(e => [e.id, e]));
     selected.clear(); lastClicked = null;  // 表示し直したら選択は外す (見えていない仕訳を消さないため)
-    $('#j-title').innerHTML = reportHeader('仕訳帳', `${fmtDate($('#j-from').value)} 〜 ${fmtDate($('#j-to').value)}　${r.total} 伝票${sort === 'description' ? '　摘要順' : ''}`);
+    const acct = acctCombo.id ? S.accountById[acctCombo.id] : null;
+    const sub = acct && subCombo.id ? S.subById[subCombo.id] : null;
+    const what = acct ? `　${acct.code} ${acct.name}${sub ? ' / ' + sub.code + ' ' + sub.name : ''}` : '';
+    $('#j-title').innerHTML = reportHeader('仕訳帳' + what, `${fmtDate($('#j-from').value)} 〜 ${fmtDate($('#j-to').value)}　${r.total} 伝票${sort === 'description' ? '　摘要順' : ''}`);
     let total = 0;
     const rows = [];
     // 摘要順のときは、摘要が変わる位置に小計を挟む

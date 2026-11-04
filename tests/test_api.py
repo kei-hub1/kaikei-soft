@@ -1507,3 +1507,21 @@ def test_restore_backup_after_bulk_delete(client):
     # 「バックアップをダウンロード」で作ったものも一覧に出る
     assert client.get("/api/backup").status_code == 200
     assert any(x["kind"] == "" for x in client.get("/api/system/backups").json())
+
+
+def test_journal_list_filters_by_sub_account(client):
+    """仕訳帳の補助科目の絞り込み: 借方・貸方のどちらかがその補助科目の伝票だけを返す。"""
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+    a, b = (client.post(f"/api/accounts/{acc['111']['id']}/sub-accounts", json={"code": c, "name": n}).json()
+            for c, n in (("01", "A銀行"), ("02", "B信金")))
+    for sub, side in ((a, "debit"), (b, "debit"), (b, "credit")):
+        line = {"debit_account_id": acc["111"]["id"], "credit_account_id": acc["500"]["id"], "amount": 100}
+        if side == "credit":
+            line = {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["111"]["id"], "amount": 100}
+        line[f"{side}_sub_id"] = sub["id"]
+        client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": d, "lines": [line]}).raise_for_status()
+    q = lambda sid: client.get(f"/api/clients/{cl['id']}/entries",
+                               params={"account_id": acc["111"]["id"], "sub_id": sid}).json()["total"]
+    assert q(a["id"]) == 1 and q(b["id"]) == 2
+    assert client.get(f"/api/clients/{cl['id']}/entries", params={"account_id": acc["111"]["id"]}).json()["total"] == 3
