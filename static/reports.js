@@ -58,7 +58,7 @@ routes.journal = async function (main, params) {
   <div class="toolbar no-print">
     ${periodToolbar('j', { from: params.from, to: params.to })}
     <div class="field"><span>科目</span><input id="j-acct" style="width:200px" placeholder="コード・かな・名称 (空欄で全科目)"></div>
-    <div class="field"><span>摘要検索</span><input id="j-q" style="width:160px"></div>
+    <div class="field"><span>摘要・取引先名で検索</span><input id="j-q" style="width:160px"></div>
     <div class="field"><span>並び順</span><select id="j-sort">
       <option value="date">日付順</option><option value="description">摘要順</option></select></div>
     <button id="j-run" class="primary">表示</button>
@@ -67,7 +67,7 @@ routes.journal = async function (main, params) {
   <div class="panel"><div id="j-title"></div>
   <div class="muted no-print" style="margin:2px 0 4px">行をクリックすると、その仕訳をこの画面のまま修正できます。修正画面から前後の仕訳へそのまま移れます。</div>
   <div class="scroll-x"><table class="grid compact sticky-head" id="j-table"><thead><tr>
-    <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th><th>摘要</th>
+    <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th><th>取引先名</th><th>摘要</th>
   </tr></thead><tbody></tbody></table></div></div>`;
   // 開いた直後からコードを打てるよう、科目欄は入力欄 (コード・かな・名称で検索)
   // 科目を変えたら摘要の絞り込みは外す。前の科目に合わせて入れた摘要が
@@ -97,7 +97,7 @@ routes.journal = async function (main, params) {
     const flush = () => {
       if (curDesc === null || !grpCount) return;
       rows.push(`<tr class="subtotal"><td colspan="6">${esc(curDesc || '(摘要なし)')} 小計 (${grpCount} 行)</td>
-        <td class="num">${fmt(grpDr)}</td><td></td></tr>`);
+        <td class="num">${fmt(grpDr)}</td><td colspan="2"></td></tr>`);
       grpDr = 0; grpCount = 0;
     };
     for (const e of r.entries) {
@@ -112,12 +112,12 @@ routes.journal = async function (main, params) {
           <td class="code">${i === 0 ? fmtDate(e.entry_date) : ''}</td><td class="num">${i === 0 ? e.voucher_no : ''}</td>
           <td>${l.debit_code ? esc(l.debit_code + ' ' + l.debit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.debit_sub_name || '')}</td>
           <td>${l.credit_code ? esc(l.credit_code + ' ' + l.credit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.credit_sub_name || '')}</td>
-          <td class="num">${fmt(l.amount)}</td>
+          <td class="num">${fmt(l.amount)}</td><td>${esc(l.partner || '')}</td>
           <td>${esc(l.description)}${e.memo && i === 0 ? ` <span class="memo">[${esc(e.memo)}]</span>` : ''}</td></tr>`);
       });
     }
     flush();
-    rows.push(`<tr class="total"><td colspan="6">合計</td><td class="num">${fmt(total)}</td><td></td></tr>`);
+    rows.push(`<tr class="total"><td colspan="6">合計</td><td class="num">${fmt(total)}</td><td colspan="2"></td></tr>`);
     $('#j-table tbody').innerHTML = rows.join('');
   }
   $('#j-run').onclick = run;
@@ -150,7 +150,7 @@ routes.ledger = async function (main, params) {
   <div class="panel"><div id="l-title"></div>
   <div class="muted no-print" style="margin:2px 0 4px">行をクリックすると、その仕訳をこの画面のまま修正できます。</div>
   <div class="scroll-x"><table class="grid compact sticky-head" id="l-table"><thead><tr>
-    <th>日付</th><th>No</th><th>相手科目</th><th>相手補助</th><th>摘要</th><th>借方</th><th>貸方</th><th>残高</th>
+    <th>日付</th><th>No</th><th>相手科目</th><th>相手補助</th><th>取引先名</th><th>摘要</th><th>借方</th><th>貸方</th><th>残高</th>
   </tr></thead><tbody></tbody></table></div></div>`;
   // 確定後は入力欄の文字を選択状態にしておく。続けて次のコードを打つだけで切り替わる。
   const acctCombo = makeCombo($('#l-acct'), {
@@ -165,7 +165,7 @@ routes.ledger = async function (main, params) {
   }
   let shown = [];                          // いま表示している伝票 id (表示順)
   async function run() {
-    if (!acctCombo.id) { $('#l-table tbody').innerHTML = '<tr><td colspan="8" class="empty">科目を選択してください</td></tr>'; shown = []; return; }
+    if (!acctCombo.id) { $('#l-table tbody').innerHTML = '<tr><td colspan="9" class="empty">科目を選択してください</td></tr>'; shown = []; return; }
     const sort = $('#l-sort').value;
     const qs = new URLSearchParams({ account_id: acctCombo.id, date_from: $('#l-from').value, date_to: $('#l-to').value, sort });
     if (subSel.value) qs.set('sub_id', subSel.value);
@@ -178,28 +178,28 @@ routes.ledger = async function (main, params) {
     // 摘要順では残高欄が意味を持たないので出さず、代わりに摘要ごとの小計を挟む
     $('#l-table thead th:last-child').textContent = byDesc ? '' : '残高';
     const rows = byDesc ? []
-      : [`<tr class="subtotal"><td colspan="5">前期繰越 / 期間前残高</td><td></td><td></td>${fmtCell0(r.opening)}</tr>`];
+      : [`<tr class="subtotal"><td colspan="6">前期繰越 / 期間前残高</td><td></td><td></td>${fmtCell0(r.opening)}</tr>`];
     let curDesc = null;
     const groupOf = (d) => (r.groups || []).find(g => g.description === d);
     for (const x of r.rows) {
       if (byDesc && x.description !== curDesc) {
         if (curDesc !== null) {
           const g = groupOf(curDesc);
-          if (g) rows.push(`<tr class="subtotal"><td colspan="5">${esc(curDesc || '(摘要なし)')} 小計 (${g.count} 件)</td>${fmtCell0(g.debit)}${fmtCell0(g.credit)}<td></td></tr>`);
+          if (g) rows.push(`<tr class="subtotal"><td colspan="6">${esc(curDesc || '(摘要なし)')} 小計 (${g.count} 件)</td>${fmtCell0(g.debit)}${fmtCell0(g.credit)}<td></td></tr>`);
         }
         curDesc = x.description;
       }
       rows.push(`<tr class="clickable" data-id="${x.entry_id}">
         <td class="code">${fmtDate(x.date)}</td><td class="num">${x.voucher_no}</td>
         <td>${x.counter_code ? esc(x.counter_code + ' ' + x.counter_name) : '<span class="muted">諸口</span>'}</td><td>${esc(x.counter_sub)}</td>
-        <td>${esc(x.description)}${x.sub_name && !subSel.value ? ` <span class="muted">(${esc(x.sub_name)})</span>` : ''}</td>
+        <td>${esc(x.partner || '')}</td><td>${esc(x.description)}${x.sub_name && !subSel.value ? ` <span class="muted">(${esc(x.sub_name)})</span>` : ''}</td>
         ${fmtCell(x.debit)}${fmtCell(x.credit)}${byDesc ? '<td></td>' : fmtCell0(x.balance)}</tr>`);
     }
     if (byDesc && curDesc !== null) {
       const g = groupOf(curDesc);
-      if (g) rows.push(`<tr class="subtotal"><td colspan="5">${esc(curDesc || '(摘要なし)')} 小計 (${g.count} 件)</td>${fmtCell0(g.debit)}${fmtCell0(g.credit)}<td></td></tr>`);
+      if (g) rows.push(`<tr class="subtotal"><td colspan="6">${esc(curDesc || '(摘要なし)')} 小計 (${g.count} 件)</td>${fmtCell0(g.debit)}${fmtCell0(g.credit)}<td></td></tr>`);
     }
-    rows.push(`<tr class="total"><td colspan="5">期間合計${byDesc ? '' : ' / 残高'}</td>${fmtCell0(r.total_debit)}${fmtCell0(r.total_credit)}${byDesc ? '<td></td>' : fmtCell0(r.closing)}</tr>`);
+    rows.push(`<tr class="total"><td colspan="6">期間合計${byDesc ? '' : ' / 残高'}</td>${fmtCell0(r.total_debit)}${fmtCell0(r.total_credit)}${byDesc ? '<td></td>' : fmtCell0(r.closing)}</tr>`);
     $('#l-table tbody').innerHTML = rows.join('');
   }
   function step(dir) {

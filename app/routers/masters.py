@@ -442,9 +442,18 @@ def description_suggestions(client_id: int, limit: int = 300):
             "  WHERE e.client_id=? AND l.description<>'' GROUP BY l.description"
             ") u LEFT JOIN description_readings r ON r.client_id=? AND r.text=u.text "
             "ORDER BY u.n DESC, u.last_used DESC LIMIT ?", (client_id, client_id, limit)).fetchall()
+        # 取引先名の候補 (過去に使った取引先名。よく使うものほど上)
+        partners = conn.execute(
+            "SELECT u.text, u.n, COALESCE(r.kana, '') AS kana FROM ("
+            "  SELECT l.partner AS text, COUNT(*) AS n, MAX(e.entry_date) AS last_used "
+            "  FROM journal_lines l JOIN journal_entries e ON e.id=l.entry_id "
+            "  WHERE e.client_id=? AND l.partner<>'' GROUP BY l.partner"
+            ") u LEFT JOIN description_readings r ON r.client_id=? AND r.text=u.text "
+            "ORDER BY u.n DESC, u.last_used DESC LIMIT ?", (client_id, client_id, limit)).fetchall()
         return {
             "presets": [dict(r) for r in presets],
             "history": [dict(r) for r in used if r["text"] not in seen],
+            "partners": [dict(r) for r in partners],
         }
 
 
@@ -573,6 +582,7 @@ class TemplateLineIn(BaseModel):
     credit_sub_id: int | None = None
     credit_dept_id: int | None = None
     amount: int = 0
+    partner: str = ""
     description: str = ""
 
 
@@ -608,9 +618,9 @@ def _save_template_lines(conn, tid: int, lines: list[TemplateLineIn]) -> None:
     conn.execute("DELETE FROM entry_template_lines WHERE template_id=?", (tid,))
     conn.executemany(
         "INSERT INTO entry_template_lines(template_id,line_no,debit_account_id,debit_sub_id,debit_dept_id,"
-        "credit_account_id,credit_sub_id,credit_dept_id,amount,description) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "credit_account_id,credit_sub_id,credit_dept_id,amount,partner,description) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         [(tid, i, l.debit_account_id, l.debit_sub_id, l.debit_dept_id,
-          l.credit_account_id, l.credit_sub_id, l.credit_dept_id, l.amount, l.description.strip())
+          l.credit_account_id, l.credit_sub_id, l.credit_dept_id, l.amount, l.partner.strip(), l.description.strip())
          for i, l in enumerate(lines, 1)])
 
 
@@ -665,7 +675,7 @@ def create_template_from_entry(client_id: int, entry_id: int, code: str = "", na
         _save_template_lines(conn, cur.lastrowid, [TemplateLineIn(
             debit_account_id=l["debit_account_id"], debit_sub_id=l["debit_sub_id"], debit_dept_id=l["debit_dept_id"],
             credit_account_id=l["credit_account_id"], credit_sub_id=l["credit_sub_id"], credit_dept_id=l["credit_dept_id"],
-            amount=l["amount"], description=l["description"]) for l in lines])
+            amount=l["amount"], partner=l["partner"], description=l["description"]) for l in lines])
         return _template_rows(conn, tid=cur.lastrowid)[0]
 
 

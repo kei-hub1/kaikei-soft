@@ -917,7 +917,7 @@ routes.templates = async function (main) {
     <span class="muted">仕訳入力画面で <kbd>F2</kbd> を押すと呼び出せます。入力済みの伝票は、仕訳入力画面の「定型登録」からそのまま追加できます。</span></div>
   <div class="panel"><div class="scroll-x"><table class="grid compact" id="p-table"><thead><tr>
     <th style="width:70px">コード</th><th style="width:180px">名称</th><th>借方</th><th>貸方</th>
-    <th style="width:100px">金額</th><th>摘要</th><th style="width:130px"></th>
+    <th style="width:100px">金額</th><th style="width:160px">取引先名</th><th>摘要</th><th style="width:130px"></th>
   </tr></thead><tbody></tbody></table></div></div>`;
 
   /** 定型仕訳の編集ダイアログ。連続登録に対応する。 */
@@ -937,7 +937,7 @@ routes.templates = async function (main) {
       <table class="entry-grid" id="p-lines"><thead><tr>
         <th style="width:26px">#</th><th class="dr">借方科目</th><th class="dr" style="width:12%">借方補助</th>
         <th class="cr">貸方科目</th><th class="cr" style="width:12%">貸方補助</th>
-        <th style="width:12%">金額</th><th style="width:28%">摘要</th><th style="width:30px"></th>
+        <th style="width:12%">金額</th><th style="width:13%">取引先名</th><th style="width:18%">摘要</th><th style="width:30px"></th>
       </tr></thead><tbody></tbody></table>
       <div class="row" style="margin-top:6px"><button id="p-addrow">行追加</button>
         <span class="muted">金額 0 (空欄) は、呼び出したときに都度入力します。</span></div>
@@ -956,6 +956,7 @@ routes.templates = async function (main) {
         <td><input data-f="dr" placeholder="コード・かな・名称"></td><td><input data-f="drsub" placeholder="補助"></td>
         <td><input data-f="cr" placeholder="コード・かな・名称"></td><td><input data-f="crsub" placeholder="補助"></td>
         <td><input data-f="amount" class="num" inputmode="numeric"></td>
+        <td><input data-f="partner"></td>
         <td><input data-f="desc"></td>
         <td class="act"><button class="small" tabindex="-1" data-f="del" title="行削除">×</button></td></tr>`);
       body.appendChild(tr);
@@ -973,6 +974,7 @@ routes.templates = async function (main) {
       if (l.credit_account_id) cr.set(l.credit_account_id);
       if (l.credit_sub_id) crSub.set(l.credit_sub_id);
       if (l.amount) f('amount').value = fmt(l.amount);
+      f('partner').value = l.partner || '';
       f('desc').value = l.description || '';
       f('del').onclick = () => { if (body.children.length > 1) { tr.remove(); renumber(); } };
       renumber();
@@ -987,9 +989,9 @@ routes.templates = async function (main) {
         return {
           debit_account_id: c.dr.id, debit_sub_id: c.drSub.id,
           credit_account_id: c.cr.id, credit_sub_id: c.crSub.id,
-          amount: parseAmount(f('amount').value), description: f('desc').value.trim(),
+          amount: parseAmount(f('amount').value), partner: f('partner').value.trim(), description: f('desc').value.trim(),
         };
-      }).filter(l => l.debit_account_id || l.credit_account_id || l.amount || l.description);
+      }).filter(l => l.debit_account_id || l.credit_account_id || l.amount || l.partner || l.description);
     }
 
     lines.forEach(l => addRow(l));
@@ -1036,7 +1038,7 @@ routes.templates = async function (main) {
           <td>${esc(acctLabel(l.debit_account_id))}${l.debit_sub_id ? ' / ' + esc(subLabel(l.debit_sub_id)) : ''}</td>
           <td>${esc(acctLabel(l.credit_account_id))}${l.credit_sub_id ? ' / ' + esc(subLabel(l.credit_sub_id)) : ''}</td>
           <td class="num">${l.amount ? fmt(l.amount) : '<span class="muted">都度</span>'}</td>
-          <td>${esc(l.description || '')}</td>
+          <td>${esc(l.partner || '')}</td><td>${esc(l.description || '')}</td>
           <td style="white-space:nowrap">${i === 0 ? `<button class="small" data-edit="${t.id}">修正</button> <button class="small danger" data-del="${t.id}">削除</button>` : ''}</td>
         </tr>`);
       });
@@ -1278,13 +1280,13 @@ routes.data = async function (main) {
       <a class="btn" href="/api/fiscal-years/${S.fy ? S.fy.id : 0}/export/journal.csv">仕訳 CSV をダウンロード</a>` : '<p class="muted">顧問先を選択してください</p>'}
     </div>
     <div class="panel"><h3 style="margin-top:0">仕訳 CSV 取込</h3>
-      ${hasClient ? `<p>本ソフトで出力した形式の CSV を取り込みます (UTF-8 / Shift_JIS)。科目はコードまたは科目名で照合します。同じ「日付+伝票番号」の行は 1 伝票にまとめます。<br><b>日付・金額・摘要・補助科目が同じ伝票が既にあれば取り込みません。</b>科目は比較しないので、取り込んだ後に科目を付け替えた仕訳があっても、同じ通帳履歴をもう一度取り込んで二重計上になることはありません。</p><p class="help"><b>ファイルを選ぶと、どの通帳 (補助科目) のものかを必ず確認します。</b>選んだ補助科目は、<b>その補助科目が属する科目の行で補助科目が空のものに、まとめて付けます</b> (CSV に補助科目が書いてあればそちらが優先)。まだ登録していない通帳は、その場で登録できます。補助科目で通帳を区別するので、別々の口座に同じ日・同じ金額・同じ摘要の入出金があっても、片方だけ取り込まれないということは起きません。</p>
+      ${hasClient ? `<p>本ソフトで出力した形式の CSV を取り込みます (UTF-8 / Shift_JIS)。科目はコードまたは科目名で照合します。同じ「日付+伝票番号」の行は 1 伝票にまとめます。<br><b>日付・金額・取引先名・摘要・補助科目が同じ伝票が既にあれば取り込みません。</b>科目は比較しないので、取り込んだ後に科目を付け替えた仕訳があっても、同じ通帳履歴をもう一度取り込んで二重計上になることはありません。</p><p class="help"><b>ファイルを選ぶと、どの通帳 (補助科目) のものかを必ず確認します。</b>選んだ補助科目は、<b>その補助科目が属する科目の行で補助科目が空のものに、まとめて付けます</b> (CSV に補助科目が書いてあればそちらが優先)。まだ登録していない通帳は、その場で登録できます。補助科目で通帳を区別するので、別々の口座に同じ日・同じ金額・同じ摘要の入出金があっても、片方だけ取り込まれないということは起きません。</p>
       <div class="row"><input type="file" id="i-file" accept=".csv,text/csv"><button id="i-check">検証</button><button id="i-run" class="primary">取込</button></div>
       <div class="row" style="margin-top:6px;gap:8px;align-items:center">
         <span class="muted">通帳 (補助科目):</span><b id="i-sub-label" class="muted">ファイルを選ぶと確認します</b>
         <button id="i-sub-change" class="small">選び直す / 通帳を登録</button></div>
       <div id="i-result" style="margin-top:8px"></div>
-      <details style="margin-top:8px"><summary class="muted">CSV の列</summary><code style="font-size:11px">日付, 伝票番号, 借方科目コード, 借方科目名, 借方補助コード, 借方補助名, 借方部門コード, 貸方科目コード, 貸方科目名, 貸方補助コード, 貸方補助名, 貸方部門コード, 金額, 摘要, 伝票メモ</code></details>` : '<p class="muted">顧問先を選択してください</p>'}
+      <details style="margin-top:8px"><summary class="muted">CSV の列</summary><code style="font-size:11px">日付, 伝票番号, 借方科目コード, 借方科目名, 借方補助コード, 借方補助名, 借方部門コード, 貸方科目コード, 貸方科目名, 貸方補助コード, 貸方補助名, 貸方部門コード, 金額, 取引先名, 摘要, 伝票メモ</code><br><span class="muted">列は見出しの名前で探すので、並び順は自由です。「取引先名」の列は無くても取り込めます。</span></details>` : '<p class="muted">顧問先を選択してください</p>'}
     </div>
     <div class="panel"><h3 style="margin-top:0">繰越処理</h3>
       ${hasClient && S.fy ? `<p>「${esc(S.fy.label)}」の期末残高を翌期の期首残高へ転記します。翌期が無い場合は自動作成します。当期純利益は ${S.client.entity_type === 'sole' ? '元入金' : '繰越利益剰余金'} へ加算されます。<br>翌期の期首残高は上書きされます。決算確定後に実行してください (何度でも再実行できます)。</p>
@@ -1359,7 +1361,7 @@ routes.data = async function (main) {
       if (r.skipped) {
         const more = r.skipped > r.skipped_samples.length ? `<li class="muted">…ほか ${r.skipped - r.skipped_samples.length} 件</li>` : '';
         html += ` <span class="badge">${r.skipped} 伝票は登録済みのため${dry ? '取り込みません' : '飛ばしました'}</span>
-          <details style="margin-top:6px"><summary class="muted">登録済みと判定した伝票 (日付・金額・摘要)</summary>
+          <details style="margin-top:6px"><summary class="muted">登録済みと判定した伝票 (日付・金額・取引先名・摘要)</summary>
           <ul style="margin:4px 0 0;padding-left:20px;font-size:12px">${r.skipped_samples.map(s => `<li>${esc(s)}</li>`).join('')}${more}</ul></details>`;
       }
       res.innerHTML = html;

@@ -3,8 +3,9 @@
 仕訳 CSV 形式 (ヘッダ行あり, UTF-8 BOM 付き / Shift_JIS も取込可):
   日付, 伝票番号, 借方科目コード, 借方科目名, 借方補助コード, 借方補助名, 借方部門コード,
   貸方科目コード, 貸方科目名, 貸方補助コード, 貸方補助名, 貸方部門コード,
-  金額, 摘要, 伝票メモ
+  金額, 取引先名, 摘要, 伝票メモ
 同じ 日付+伝票番号 の行は 1 伝票にまとめる。伝票番号が空の行は 1 行 1 伝票。
+列は見出しの名前で探すので、並び順は問わない。「取引先名」の列は無くてもよい (「取引先」でも可)。
 消費税は扱わない。以前の CSV にある「消費税区分」「消費税額」の列は読み飛ばす。
 """
 from __future__ import annotations
@@ -29,7 +30,7 @@ router = APIRouter(prefix="/api", tags=["io"])
 
 CSV_HEADER = ["日付", "伝票番号", "借方科目コード", "借方科目名", "借方補助コード", "借方補助名", "借方部門コード",
               "貸方科目コード", "貸方科目名", "貸方補助コード", "貸方補助名", "貸方部門コード",
-              "金額", "摘要", "伝票メモ"]
+              "金額", "取引先名", "摘要", "伝票メモ"]
 
 
 @router.get("/fiscal-years/{fy_id}/export/journal.csv")
@@ -40,7 +41,7 @@ def export_journal_csv(fy_id: int, date_from: str | None = None, date_to: str | 
             raise HTTPException(404, "会計期間が見つかりません")
         rows = conn.execute(
             """
-            SELECT e.entry_date, e.voucher_no, e.memo, l.amount, l.description,
+            SELECT e.entry_date, e.voucher_no, e.memo, l.amount, l.partner, l.description,
               da.code AS dc, da.name AS dn, ds.code AS dsc, ds.name AS dsn, dd.code AS ddc,
               ca.code AS cc, ca.name AS cn, cs.code AS csc, cs.name AS csn, cd.code AS cdc
             FROM journal_lines l JOIN journal_entries e ON e.id=l.entry_id
@@ -59,7 +60,7 @@ def export_journal_csv(fy_id: int, date_from: str | None = None, date_to: str | 
     for r in rows:
         w.writerow([r["entry_date"], r["voucher_no"], r["dc"] or "", r["dn"] or "", r["dsc"] or "", r["dsn"] or "", r["ddc"] or "",
                     r["cc"] or "", r["cn"] or "", r["csc"] or "", r["csn"] or "", r["cdc"] or "",
-                    r["amount"], r["description"], r["memo"]])
+                    r["amount"], r["partner"], r["description"], r["memo"]])
     data = ("﻿" + buf.getvalue()).encode("utf-8")
     fname = f"journal_{fy['start_date']}_{fy['end_date']}.csv"
     return Response(content=data, media_type="text/csv; charset=utf-8",
@@ -220,6 +221,7 @@ async def import_journal_csv(client_id: int, file: UploadFile, dry_run: bool = F
             credit_account_id=cr, credit_sub_id=cr_sub,
             credit_dept_id=depts.get(col(row, "貸方部門コード")) if col(row, "貸方部門コード") else None,
             amount=_to_int(col(row, "金額")) or 0,
+            partner=col(row, "取引先名") or col(row, "取引先"),
             description=col(row, "摘要"),
         )
         if key not in groups:
@@ -420,7 +422,7 @@ async def fix_import_periods(client_id: int, file: UploadFile):
 
 
 def _fingerprint(entry_date: str, memo: str, lines: list[dict]) -> tuple:
-    """重複判定に使うキー: 日付と、各行の金額・摘要・補助科目。
+    """重複判定に使うキー: 日付と、各行の金額・取引先名・摘要・補助科目。
 
     科目・部門・伝票メモ・伝票番号は比較しない。
     通帳から取り込んだ仕訳は後で科目を付け替えるのが前提で、付け替えた後に
@@ -429,9 +431,12 @@ def _fingerprint(entry_date: str, memo: str, lines: list[dict]) -> tuple:
     補助科目 (通帳) だけは比較に含める。通帳ごとに CSV を分けて取り込むとき、
     別々の口座に同じ日・同じ金額・同じ摘要の入出金があっても、
     片方が取り込まれないということが起きないようにするため。
+
+    取引先名も比較に含める。同じ日に同じ金額・同じ摘要 (「振込」など) で
+    別々の取引先へ支払ったとき、片方が取り込まれないということが起きないようにするため。
     """
     return (entry_date, tuple(
-        (l["amount"], l["description"].strip(), l["debit_sub_id"], l["credit_sub_id"])
+        (l["amount"], (l.get("partner") or "").strip(), l["description"].strip(), l["debit_sub_id"], l["credit_sub_id"])
         for l in lines))
 
 
@@ -441,7 +446,7 @@ def _existing_fingerprints(conn, client_id: int, dates: list[str]) -> dict[tuple
         return {}
     rows = conn.execute(
         """
-        SELECT e.id, e.entry_date, e.memo, l.amount, l.description, l.debit_sub_id, l.credit_sub_id
+        SELECT e.id, e.entry_date, e.memo, l.amount, l.partner, l.description, l.debit_sub_id, l.credit_sub_id
         FROM journal_entries e JOIN journal_lines l ON l.entry_id=e.id
         WHERE e.client_id=? AND e.entry_date>=? AND e.entry_date<=?
         ORDER BY e.id, l.line_no
@@ -462,7 +467,8 @@ def _entry_label(e: EntryIn) -> str:
     """飛ばした伝票を画面に示すための短い表記。"""
     amount = sum(l.amount for l in e.lines if l.debit_account_id) or sum(l.amount for l in e.lines)
     desc = next((l.description for l in e.lines if l.description), "") or e.memo
-    return f"{e.entry_date}  {amount:,}  {desc}".rstrip()
+    partner = next((l.partner for l in e.lines if l.partner), "")
+    return "  ".join(x for x in (e.entry_date, f"{amount:,}", partner, desc) if x)
 
 
 @router.post("/clients/{client_id}/import/accounts")

@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS journal_lines (
   credit_sub_id INTEGER REFERENCES sub_accounts(id),
   credit_dept_id INTEGER REFERENCES departments(id),
   amount INTEGER NOT NULL,
+  partner TEXT NOT NULL DEFAULT '',          -- 取引先名 (摘要とは別に持つ)
   -- 以下 3 列は使っていない (消費税を扱っていた頃の名残。過去の入力を消さないよう列は残す)
   tax_class TEXT NOT NULL DEFAULT '00',
   tax_rate INTEGER NOT NULL DEFAULT 0,
@@ -171,6 +172,7 @@ CREATE TABLE IF NOT EXISTS entry_template_lines (
   credit_dept_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
   amount INTEGER NOT NULL DEFAULT 0,
   tax_class TEXT NOT NULL DEFAULT '',   -- 使っていない (同上)
+  partner TEXT NOT NULL DEFAULT '',
   description TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_template_lines ON entry_template_lines(template_id, line_no);
@@ -196,6 +198,9 @@ def connect() -> sqlite3.Connection:
 ADDED_COLUMNS: list[tuple[str, str, str]] = [
     # 定型仕訳が伝票メモも持てるようにする
     ("entry_templates", "memo", "TEXT NOT NULL DEFAULT ''"),
+    # 取引先名 (摘要とは別の項目)
+    ("journal_lines", "partner", "TEXT NOT NULL DEFAULT ''"),
+    ("entry_template_lines", "partner", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 # 使わなくなったテーブル・列。既存の DB から取り除く。

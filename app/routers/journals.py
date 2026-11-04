@@ -27,9 +27,11 @@ class LineIn(BaseModel):
     credit_sub_id: int | None = None
     credit_dept_id: int | None = None
     amount: int = Field(ge=0)
+    partner: str = ""              # 取引先名
     description: str = ""
-    # 摘要を打ったときの読み (漢字に変換する前のかな)。予測変換の候補に使う。保存はしない
+    # 摘要・取引先名を打ったときの読み (漢字に変換する前のかな)。予測変換の候補に使う。保存はしない
     description_kana: str = ""
+    partner_kana: str = ""
     # 消費税は扱わない (申告が必要な顧問先は別のソフトで処理する)。
     # 以前の画面・CSV・定型仕訳から tax_class などが送られてきても無視する。
 
@@ -92,6 +94,7 @@ def _validate_entry(conn, client_id: int, e: EntryIn) -> dict:
             "debit_account_id": l.debit_account_id, "debit_sub_id": l.debit_sub_id or None, "debit_dept_id": l.debit_dept_id or None,
             "credit_account_id": l.credit_account_id, "credit_sub_id": l.credit_sub_id or None, "credit_dept_id": l.credit_dept_id or None,
             "amount": l.amount,
+            "partner": l.partner.strip(),
             "description": l.description.strip(),
         })
     if total_d != total_c:
@@ -102,9 +105,9 @@ def _validate_entry(conn, client_id: int, e: EntryIn) -> dict:
 def _insert_lines(conn, entry_id: int, lines: list[dict]) -> None:
     conn.executemany(
         "INSERT INTO journal_lines(entry_id,line_no,debit_account_id,debit_sub_id,debit_dept_id,credit_account_id,credit_sub_id,credit_dept_id,"
-        "amount,description) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "amount,partner,description) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         [(entry_id, i, l["debit_account_id"], l["debit_sub_id"], l["debit_dept_id"], l["credit_account_id"], l["credit_sub_id"],
-          l["credit_dept_id"], l["amount"], l["description"])
+          l["credit_dept_id"], l["amount"], l["partner"], l["description"])
          for i, l in enumerate(lines, 1)],
     )
 
@@ -120,13 +123,14 @@ def to_hiragana(s: str) -> str:
 
 
 def learn_readings(conn, client_id: int, lines: list[LineIn]) -> None:
-    """摘要と、そのとき打った読みを覚える (次から読みで候補に出すため)。
+    """摘要・取引先名と、そのとき打った読みを覚える (次から読みで候補に出すため)。
 
-    読みがかなだけでできていて、摘要そのものと違う (= 変換した) ときだけ覚える。
+    読みがかなだけでできていて、文字そのものと違う (= 変換した) ときだけ覚える。
     """
-    for l in lines:
-        text = l.description.strip()
-        kana = to_hiragana(l.description_kana)
+    pairs = [(l.description, l.description_kana) for l in lines] + [(l.partner, l.partner_kana) for l in lines]
+    for text, kana in pairs:
+        text = text.strip()
+        kana = to_hiragana(kana)
         if not text or not kana or len(kana) > 100 or not _KANA_ONLY.match(kana):
             continue
         if kana == to_hiragana(text):
@@ -229,8 +233,10 @@ def list_entries(
         where.append("EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id=e.id AND (l.debit_sub_id=? OR l.credit_sub_id=?))")
         params += [sub_id, sub_id]
     if q:
-        where.append("(e.memo LIKE ? OR EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id=e.id AND l.description LIKE ?))")
-        params += [f"%{q}%", f"%{q}%"]
+        # 摘要・取引先名・伝票メモのどれかに含まれていれば出す
+        where.append("(e.memo LIKE ? OR EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id=e.id "
+                     "AND (l.description LIKE ? OR l.partner LIKE ?)))")
+        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
     if description:
         # 摘要の完全一致 (同じ摘要の取引だけを抜き出す)
         where.append("EXISTS (SELECT 1 FROM journal_lines l WHERE l.entry_id=e.id AND l.description=?)")

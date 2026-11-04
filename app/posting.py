@@ -29,6 +29,7 @@ class Posting:
     entry_date: str
     voucher_no: int
     description: str
+    partner: str = ""    # 取引先名
 
 
 def line_to_postings(line: sqlite3.Row | dict) -> list[Posting]:
@@ -39,7 +40,7 @@ def line_to_postings(line: sqlite3.Row | dict) -> list[Posting]:
     cr = l.get("credit_account_id")
     base = dict(
         line_id=l["id"], entry_id=l["entry_id"], entry_date=l["entry_date"],
-        voucher_no=l["voucher_no"], description=l.get("description") or "",
+        voucher_no=l["voucher_no"], description=l.get("description") or "", partner=l.get("partner") or "",
     )
     postings: list[Posting] = []
     if dr:
@@ -277,7 +278,7 @@ def ledger(conn: sqlite3.Connection, fiscal_year_id: int, account_id: int, date_
             "counter_code": ca["code"] if ca else "", "counter_name": ca["name"] if ca else "諸口",
             "counter_sub": cs["name"] if cs else "",
             "sub_name": s["name"] if s else "",
-            "description": p.description,
+            "description": p.description, "partner": p.partner,
             "debit": p.amount if p.side == "D" else 0, "credit": p.amount if p.side == "C" else 0,
             "balance": bal if ns == "D" else -bal,
         })

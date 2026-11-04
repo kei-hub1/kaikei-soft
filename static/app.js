@@ -241,7 +241,7 @@ async function selectClient(id, keepFy = false) {
   localStorage.setItem('clientId', S.client ? S.client.id : '');
   if (!S.client) {
     S.fiscalYears = []; S.fy = null; S.accounts = []; S.accountById = {}; S.subsByAccount = {}; S.subById = {};
-    S.departments = []; S.templates = []; S.descriptions = []; S.descriptionItems = [];
+    S.departments = []; S.templates = []; S.descriptions = []; S.descriptionItems = []; S.partnerItems = [];
     $('#sel-fy').innerHTML = '';
     $('#client-badges').innerHTML = '';
     return;
@@ -296,6 +296,8 @@ async function loadDescriptions() {
   S.descriptions = presets;
   S.descriptionItems = sug.presets.concat(
     sug.history.map(h => ({ id: null, code: '', text: h.text, kana: h.kana || '', account_id: null, used: h.n })));
+  // 取引先名の候補 (過去に使った取引先名)
+  S.partnerItems = (sug.partners || []).map(h => ({ id: null, code: '', text: h.text, kana: h.kana || '', account_id: null, used: h.n }));
 }
 
 // ---------------------------------------------------------------- router

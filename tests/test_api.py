@@ -1355,3 +1355,78 @@ def test_description_readings_are_learned_for_suggestions(client):
     client.post(f"/api/clients/{cl['id']}/descriptions", json={"text": "水道代"}).raise_for_status()
     sug = client.get(f"/api/clients/{cl['id']}/description-suggestions").json()
     assert next(p for p in sug["presets"] if p["text"] == "水道代")["kana"] == "すいどうだい"
+
+
+def test_csv_import_reads_partner_name(client):
+    """CSV の「取引先名」列を、摘要とは別の項目として取り込む。重複判定にも使う。"""
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+    head = ("日付,借方科目コード,貸方科目コード,金額,取引先名,摘要\r\n")
+
+    def upload(body, dry=False):
+        files = {"file": ("bank.csv", io.BytesIO((head + body).encode("cp932")), "text/csv")}
+        r = client.post(f"/api/clients/{cl['id']}/import/journal", params={"dry_run": dry}, files=files)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    body = (f"{d},617,111,50000,ﾔﾏﾀﾞｼｮｳｼﾞ,振込\r\n"
+            f"{d},617,111,50000,ｽｽﾞｷｼｮｳﾃﾝ,振込\r\n")      # 同じ日・金額・摘要で取引先だけ違う
+    assert upload(body)["count"] == 2
+    entries = _entries(client, fy)
+    assert sorted((e["lines"][0]["partner"], e["lines"][0]["description"]) for e in entries) == [
+        ("ｽｽﾞｷｼｮｳﾃﾝ", "振込"), ("ﾔﾏﾀﾞｼｮｳｼﾞ", "振込")]
+    # 同じ CSV をもう一度取り込んでも重ならない
+    r = upload(body, dry=True)
+    assert r["count"] == 0 and r["skipped"] == 2
+    assert any("ﾔﾏﾀﾞｼｮｳｼﾞ" in s and "振込" in s for s in r["skipped_samples"])
+
+    # 「取引先」という列名でも読む / 列が無くても取り込める
+    head2 = "日付,借方科目コード,貸方科目コード,金額,取引先,摘要\r\n"
+    files = {"file": ("b.csv", io.BytesIO((head2 + f"{d},617,111,700,ﾀﾅｶ,口座振替\r\n").encode("utf-8")), "text/csv")}
+    assert client.post(f"/api/clients/{cl['id']}/import/journal", files=files).json()["count"] == 1
+    assert _upload_csv(client, cl, [_csv_row(d, "617", "111", 800, desc="手数料")])["count"] == 1
+
+    # 出力した CSV に取引先名の列があり、取り込み直せる
+    text = client.get(f"/api/fiscal-years/{fy['id']}/export/journal.csv").content.decode("utf-8-sig")
+    assert text.splitlines()[0].endswith("金額,取引先名,摘要,伝票メモ")
+    assert ",ﾀﾅｶ,口座振替," in text
+
+    # 仕訳帳の検索は取引先名でも当たる / 元帳にも取引先名が出る
+    hit = client.get(f"/api/clients/{cl['id']}/entries", params={"q": "ﾔﾏﾀﾞ"}).json()
+    assert hit["total"] == 1
+    ledger = client.get(f"/api/fiscal-years/{fy['id']}/reports/ledger", params={"account_id": acc["617"]["id"]}).json()
+    assert {x["partner"] for x in ledger["rows"]} == {"ﾔﾏﾀﾞｼｮｳｼﾞ", "ｽｽﾞｷｼｮｳﾃﾝ", "ﾀﾅｶ", ""}
+
+
+def test_partner_on_entries_templates_and_suggestions(client):
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+    r = client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": d, "lines": [
+        {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["100"]["id"], "amount": 1000,
+         "partner": " 山田商事 ", "partner_kana": "やまだしょうじ", "description": "文房具"}]})
+    assert r.status_code == 201, r.text
+    e = r.json()
+    assert e["lines"][0]["partner"] == "山田商事"
+    # 修正で取引先名を変えられる
+    r = client.put(f"/api/entries/{e['id']}", json={"entry_date": d, "lines": [
+        {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["100"]["id"], "amount": 1000,
+         "partner": "山田商事株式会社", "description": "文房具"}]})
+    assert r.json()["lines"][0]["partner"] == "山田商事株式会社"
+
+    sug = client.get(f"/api/clients/{cl['id']}/description-suggestions").json()
+    assert sug["partners"][0]["text"] == "山田商事株式会社"
+    # 読みは打った取引先名 (山田商事) について覚える
+    client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": d, "lines": [
+        {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["100"]["id"], "amount": 500,
+         "partner": "山田商事", "description": "文房具"}]}).raise_for_status()
+    sug = client.get(f"/api/clients/{cl['id']}/description-suggestions").json()
+    assert {p["text"]: p["kana"] for p in sug["partners"]}["山田商事"] == "やまだしょうじ"
+
+    # 定型仕訳も取引先名を持つ (伝票から登録したときも引き継ぐ)
+    t = client.post(f"/api/clients/{cl['id']}/templates/from-entry/{e['id']}", json={}).json()
+    assert t["lines"][0]["partner"] == "山田商事株式会社"
+    r = client.post(f"/api/clients/{cl['id']}/templates", json={"code": "9", "name": "家賃", "lines": [
+        {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["100"]["id"], "amount": 0,
+         "partner": "大家さん", "description": "家賃"}]})
+    assert r.status_code == 201, r.text
+    assert r.json()["lines"][0]["partner"] == "大家さん"

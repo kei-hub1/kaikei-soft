@@ -37,14 +37,14 @@ function createEntryForm(root, opts = {}) {
         <col><col style="width:11%">${hasDept ? '<col style="width:8%">' : ''}
         <col><col style="width:11%">${hasDept ? '<col style="width:8%">' : ''}
         <col style="width:11%">
-        <col style="width:30%"><col style="width:34px">
+        <col style="width:14%"><col style="width:20%"><col style="width:34px">
       </colgroup>
       <thead><tr>
         <th>#</th>
         <th class="dr">借方科目</th><th class="dr">借方補助</th>${hasDept ? '<th class="dr">部門</th>' : ''}
         <th class="cr">貸方科目</th><th class="cr">貸方補助</th>${hasDept ? '<th class="cr">部門</th>' : ''}
         <th>金額</th>
-        <th>摘要</th><th></th>
+        <th>取引先名</th><th>摘要</th><th></th>
       </tr></thead>
       <tbody id="e-lines"></tbody>
     </table>
@@ -119,6 +119,7 @@ function createEntryForm(root, opts = {}) {
       <td><input data-f="crsub" placeholder="補助"></td>
       ${hasDept ? '<td><input data-f="crdept" placeholder="部門"></td>' : ''}
       <td><input data-f="amount" class="num" inputmode="numeric"></td>
+      <td><input data-f="partner" placeholder="取引先名"></td>
       <td><input data-f="desc" placeholder="摘要"></td>
       <td class="act"><button class="small" tabindex="-1" data-f="del" title="行削除">×</button></td>
     </tr>`);
@@ -177,6 +178,21 @@ function createEntryForm(root, opts = {}) {
         focusNext(amount);
       }
     });
+    // 取引先名: 過去に使った取引先名から候補を出す (読みでも探せる)。候補に無い名前もそのまま入る
+    const partner = f('partner');
+    const partnerSuggest = makeSuggest(partner, { items: () => S.partnerItems || [] });
+    tr._partnerSuggest = partnerSuggest;
+    partner.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) {
+        e.preventDefault();
+        partnerSuggest.resolve();
+        focusNext(partner);
+      } else if (e.key === 'F4') {
+        e.preventDefault();
+        partnerSuggest.open();
+      }
+    });
     const desc = f('desc');
     // 摘要はプリセットから選べるが、候補に無い文字列もそのまま入力できる
     const descSuggest = makeSuggest(desc, {
@@ -213,6 +229,7 @@ function createEntryForm(root, opts = {}) {
       if (data.credit_dept_id) crDept.set(data.credit_dept_id);
     }
     if (data.amount) amount.value = fmt(data.amount);
+    if (data.partner) partner.value = data.partner;
     if (data.description) desc.value = data.description;
     renumber();
     updateTotals();
@@ -248,6 +265,7 @@ function createEntryForm(root, opts = {}) {
     tr.querySelector('[data-f=drsub]').disabled = true;
     tr.querySelector('[data-f=crsub]').disabled = true;
     tr.querySelector('[data-f=amount]').value = '';
+    tr.querySelector('[data-f=partner]').value = '';
     tr.querySelector('[data-f=desc]').value = '';
     updateTotals();
   }
@@ -257,15 +275,17 @@ function createEntryForm(root, opts = {}) {
     const c = tr._combos;
     const f = (n) => tr.querySelector(`[data-f=${n}]`);
     const amt = parseAmount(f('amount').value);
-    const empty = !c.dr.id && !c.cr.id && amt === 0 && !f('desc').value.trim();
+    const empty = !c.dr.id && !c.cr.id && amt === 0 && !f('desc').value.trim() && !f('partner').value.trim();
     return {
       empty,
       debit_account_id: c.dr.id, debit_sub_id: c.drSub.id, debit_dept_id: c.drDept ? c.drDept.id : null,
       credit_account_id: c.cr.id, credit_sub_id: c.crSub.id, credit_dept_id: c.crDept ? c.crDept.id : null,
       amount: amt,
+      partner: f('partner').value.trim(),
       description: f('desc').value.trim(),
       // 漢字に変換する前に打った読み。サーバーが覚えて、次から読みで候補に出す
       description_kana: tr._descSuggest ? tr._descSuggest.reading() : '',
+      partner_kana: tr._partnerSuggest ? tr._partnerSuggest.reading() : '',
     };
   }
   /** いまの入力内容を、比較できる形にまとめる。
@@ -273,7 +293,7 @@ function createEntryForm(root, opts = {}) {
   function snapshot() {
     const lines = [];
     for (const tr of $$('tr', tbody)) {
-      const { empty, description_kana, ...l } = lineData(tr);   // 読みは内容の変化に数えない
+      const { empty, description_kana, partner_kana, ...l } = lineData(tr);   // 読みは内容の変化に数えない
       if (!empty) lines.push(l);
     }
     return JSON.stringify([currentDate, memoInput.value.trim(), lines]);
@@ -392,6 +412,7 @@ function createEntryForm(root, opts = {}) {
         combo.input.focus();
         return false;
       }
+      if (tr._partnerSuggest) tr._partnerSuggest.resolve();
       if (tr._descSuggest) tr._descSuggest.resolve();   // 摘要のコード入力を本文に展開する
       const amt = tr.querySelector('[data-f=amount]');
       if (amt) amt.value = amt.value.trim() ? fmt(parseAmount(amt.value)) : '';
@@ -560,7 +581,7 @@ function createEntryForm(root, opts = {}) {
             const ntr = addLine({
               debit_account_id: l.debit_account_id, debit_sub_id: l.debit_sub_id, debit_dept_id: l.debit_dept_id,
               credit_account_id: l.credit_account_id, credit_sub_id: l.credit_sub_id, credit_dept_id: l.credit_dept_id,
-              amount: l.amount || 0, description: l.description,
+              amount: l.amount || 0, partner: l.partner || '', description: l.description,
             });
             if (!first) first = ntr;
           }
@@ -789,7 +810,7 @@ routes.entry = async function (main, params) {
       </div>
     </div>
     <div class="scroll-x"><table class="grid compact" id="e-list"><thead><tr>
-      <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th><th>摘要</th><th></th>
+      <th>日付</th><th>No</th><th>借方科目</th><th>借方補助</th><th>貸方科目</th><th>貸方補助</th><th>金額</th><th>取引先名</th><th>摘要</th><th></th>
     </tr></thead><tbody></tbody></table></div>
   </div>`;
 
@@ -815,7 +836,7 @@ routes.entry = async function (main, params) {
           <td class="code">${i === 0 ? fmtDate(e.entry_date) : ''}</td><td class="num">${i === 0 ? e.voucher_no : ''}</td>
           <td>${l.debit_code ? esc(l.debit_code + ' ' + l.debit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.debit_sub_name || '')}</td>
           <td>${l.credit_code ? esc(l.credit_code + ' ' + l.credit_name) : '<span class="muted">諸口</span>'}</td><td>${esc(l.credit_sub_name || '')}</td>
-          <td class="num">${fmt(l.amount)}</td>
+          <td class="num">${fmt(l.amount)}</td><td>${esc(l.partner || '')}</td>
           <td>${esc(l.description)}${e.memo && i === 0 ? ` <span class="memo">[${esc(e.memo)}]</span>` : ''}</td>
           <td class="center" style="white-space:nowrap">${i === 0 ? `<button class="small" data-edit="${e.id}">修正</button> <button class="small danger" data-del="${e.id}" data-vno="${e.voucher_no}">削除</button>` : ''}</td>
         </tr>`);
