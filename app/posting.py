@@ -247,12 +247,15 @@ def trial_balance(conn: sqlite3.Connection, fiscal_year_id: int, date_from: str,
 
 
 def ledger(conn: sqlite3.Connection, fiscal_year_id: int, account_id: int, date_from: str, date_to: str,
-           sub_id: int | None = None, sort: str = "date") -> dict:
+           sub_id: int | None = None, sort: str = "date", q: str = "") -> dict:
     """総勘定元帳 / 補助元帳。
 
     sort="description" にすると摘要順、sort="partner" にすると取引先名順に並べ替え、
     同じ摘要 (取引先名) ごとに小計を付ける。グループ内は日付順。
     残高欄は日付順に積み上げた金額なので、並べ替えたときは意味を持たないため出さない。
+
+    q を渡すと、取引先名か摘要に q を含む行だけを返す (合計もその行だけ)。
+    半角カナ・カタカナ・ひらがなの違いは区別せず、覚えた読み (やまだ → 山田商事) でも当たる。
     """
     fy = conn.execute("SELECT * FROM fiscal_years WHERE id=?", (fiscal_year_id,)).fetchone()
     accts = accounts_map(conn, fy["client_id"])
@@ -296,6 +299,17 @@ def ledger(conn: sqlite3.Connection, fiscal_year_id: int, account_id: int, date_
             "debit": p.amount if p.side == "D" else 0, "credit": p.amount if p.side == "C" else 0,
             "balance": bal if ns == "D" else -bal,
         })
+    q = (q or "").strip()
+    if q:
+        kana = description_kana(conn, fy["client_id"])
+        needle = _yomi(q).lower()
+
+        def hit(text: str) -> bool:
+            return bool(text) and (needle in _yomi(text).lower() or needle in _yomi(kana.get(text, "")).lower())
+        out = [r for r in out if hit(r["partner"]) or hit(r["description"])]
+        tot_d = sum(r["debit"] for r in out)
+        tot_c = sum(r["credit"] for r in out)
+
     groups = []
     if sort in ("description", "partner"):
         # 摘要 (取引先名) ごとにまとめ、各グループの小計を添える
@@ -319,7 +333,7 @@ def ledger(conn: sqlite3.Connection, fiscal_year_id: int, account_id: int, date_
         "opening": opening if ns == "D" else -opening,
         "total_debit": tot_d, "total_credit": tot_c,
         "closing": bal if ns == "D" else -bal,
-        "sort": sort, "groups": groups,
+        "sort": sort, "groups": groups, "q": q,
         "rows": out,
     }
 

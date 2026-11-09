@@ -253,6 +253,7 @@ routes.ledger = async function (main, params) {
     ${periodToolbar('l', { from: params.from, to: params.to })}
     <div class="field"><span>並び順</span><select id="l-sort">
       <option value="date">日付順</option><option value="description">摘要順</option><option value="partner">取引先名順</option></select></div>
+    <div class="field"><span>取引先名・摘要で検索</span><input id="l-q" style="width:170px" placeholder="例: やまだ / 振込"></div>
     <button id="l-prev" title="前の科目">◀</button><button id="l-next" title="次の科目">▶</button>
     ${printButton()} ${csvButton('l-csv')} ${backButtonHtml()}
   </div>
@@ -273,22 +274,28 @@ routes.ledger = async function (main, params) {
     subSel.innerHTML = '<option value="">(科目合計)</option>' + subs.map(s => `<option value="${s.id}">${esc(s.code)} ${esc(s.name)}</option>`).join('');
   }
   let shown = [];                          // いま表示している伝票 id (表示順)
+  let ranQ = '';                           // 表示中の一覧を出したときの検索語
   async function run() {
     if (!acctCombo.id) { $('#l-table tbody').innerHTML = '<tr><td colspan="9" class="empty">科目を選択してください</td></tr>'; shown = []; return; }
     const sort = $('#l-sort').value;
     const qs = new URLSearchParams({ account_id: acctCombo.id, date_from: $('#l-from').value, date_to: $('#l-to').value, sort });
     if (subSel.value) qs.set('sub_id', subSel.value);
+    const q = $('#l-q').value.trim();
+    if (q) qs.set('q', q);
+    ranQ = q;
     const r = await GET(`/api/fiscal-years/${S.fy.id}/reports/ledger?${qs}`);
     shown = r.rows.map(x => x.entry_id);
     const a = r.account;
     $('#l-title').innerHTML = reportHeader(`${subSel.value ? '補助元帳' : '総勘定元帳'}　${a.code} ${a.name}${r.sub ? ' / ' + r.sub.name : ''}`,
-      `${fmtDate($('#l-from').value)} 〜 ${fmtDate($('#l-to').value)}${sort === 'description' ? '　摘要順' : sort === 'partner' ? '　取引先名順' : ''}`);
+      `${fmtDate($('#l-from').value)} 〜 ${fmtDate($('#l-to').value)}${sort === 'description' ? '　摘要順' : sort === 'partner' ? '　取引先名順' : ''}${q ? `　「${q}」で検索 ${r.rows.length} 件` : ''}`);
     // 摘要順・取引先名順では、まとまりごとに小計を挟む。残高欄は日付順でないと意味を持たないので出さない
     const byDesc = sort === 'description' || sort === 'partner';
+    // 検索で絞り込んだときも、間の行が抜けて残高がつながらないので残高欄は出さない
+    const noBal = byDesc || !!q;
     const field = sort;                                      // まとめる項目 (description / partner)
     const blank = sort === 'partner' ? '(取引先名なし)' : '(摘要なし)';
-    $('#l-table thead th:last-child').textContent = byDesc ? '' : '残高';
-    const rows = byDesc ? []
+    $('#l-table thead th:last-child').textContent = noBal ? '' : '残高';
+    const rows = noBal ? []
       : [`<tr class="subtotal"><td colspan="6">前期繰越 / 期間前残高</td><td></td><td></td>${fmtCell0(r.opening)}</tr>`];
     let curDesc = null;
     const groupOf = (d) => (r.groups || []).find(g => g.key === d);
@@ -305,10 +312,11 @@ routes.ledger = async function (main, params) {
         <td class="code">${fmtDate(x.date)}</td><td class="num">${x.voucher_no}</td>
         <td>${x.counter_code ? esc(x.counter_code + ' ' + x.counter_name) : '<span class="muted">諸口</span>'}</td><td>${esc(x.counter_sub)}</td>
         <td>${esc(x.partner || '')}</td><td>${esc(x.description)}${x.sub_name && !subSel.value ? ` <span class="muted">(${esc(x.sub_name)})</span>` : ''}</td>
-        ${fmtCell(x.debit)}${fmtCell(x.credit)}${byDesc ? '<td></td>' : fmtCell0(x.balance)}</tr>`);
+        ${fmtCell(x.debit)}${fmtCell(x.credit)}${noBal ? '<td></td>' : fmtCell0(x.balance)}</tr>`);
     }
     if (byDesc && curDesc !== null) rows.push(subtotalRow(curDesc));
-    rows.push(`<tr class="total"><td colspan="6">期間合計${byDesc ? '' : ' / 残高'}</td>${fmtCell0(r.total_debit)}${fmtCell0(r.total_credit)}${byDesc ? '<td></td>' : fmtCell0(r.closing)}</tr>`);
+    if (q && !r.rows.length) rows.push(`<tr><td colspan="9" class="empty">「${esc(q)}」を含む取引先名・摘要の仕訳はありません</td></tr>`);
+    rows.push(`<tr class="total"><td colspan="6">${q ? '検索結果の合計' : '期間合計'}${noBal ? '' : ' / 残高'}</td>${fmtCell0(r.total_debit)}${fmtCell0(r.total_credit)}${noBal ? '<td></td>' : fmtCell0(r.closing)}</tr>`);
     $('#l-table tbody').innerHTML = rows.join('');
   }
   function step(dir) {
@@ -321,6 +329,13 @@ routes.ledger = async function (main, params) {
   $('#l-next').onclick = () => step(1);
   subSel.onchange = run;
   $('#l-sort').onchange = run;
+  // 検索: Enter で絞り込む。空にして Enter (または欄を離れる) と元に戻る
+  $('#l-q').addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === 'Enter') { e.preventDefault(); run(); }
+  });
+  $('#l-q').addEventListener('change', () => { if ($('#l-q').value.trim() !== ranQ) run(); });
+  if (params.q) $('#l-q').value = params.q;
   bindMonthSelect('l', run);
   $('#l-csv').onclick = () => tableToCsv($('#l-table'), `元帳_${S.client.code}.csv`);
   // 行をクリックしたら、その場で修正できるダイアログを開く。

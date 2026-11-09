@@ -1545,3 +1545,25 @@ def test_ledger_sorted_by_partner(client):
     assert [x["debit"] for x in led["rows"]] == [100, 400, 200, 300, 50]
     assert client.get(f"/api/fiscal-years/{fy['id']}/reports/ledger",
                       params={"account_id": acc["617"]["id"], "sort": "x"}).status_code == 400
+
+
+def test_ledger_search_by_partner_or_description(client):
+    """総勘定元帳を取引先名・摘要で検索する。半角カナ・ひらがなの違いや、覚えた読みでも当たる。"""
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+    for partner, desc, amt, kana in (("ﾔﾏﾀﾞｼｮｳｼﾞ", "振込", 300, ""), ("山田商店", "仕入", 200, "やまだしょうてん"),
+                                     ("", "やまだ様 立替", 50, ""), ("あおば", "振込手数料", 7, "")):
+        client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": d, "lines": [
+            {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["100"]["id"], "amount": amt,
+             "partner": partner, "partner_kana": kana, "description": desc}]}).raise_for_status()
+
+    def search(q, **kw):
+        return client.get(f"/api/fiscal-years/{fy['id']}/reports/ledger",
+                          params={"account_id": acc["617"]["id"], "q": q, **kw}).json()
+    r = search("やまだ")       # 半角カナの取引先名・読みを覚えた漢字の取引先名・摘要の途中、すべて当たる
+    assert sorted(x["debit"] for x in r["rows"]) == [50, 200, 300]
+    assert r["total_debit"] == 550 and r["q"] == "やまだ"
+    assert [x["debit"] for x in search("振込")["rows"]] == [300, 7]
+    assert search("ﾌﾘｺﾐ")["rows"] == []                 # 漢字の摘要は、かなでは当たらない (読みを覚えていなければ)
+    assert [g["key"] for g in search("振込", sort="partner")["groups"]] == ["あおば", "ﾔﾏﾀﾞｼｮｳｼﾞ"]
+    assert len(search("")["rows"]) == 4
