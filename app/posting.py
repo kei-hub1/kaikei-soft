@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import sqlite3
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -113,14 +114,26 @@ def opening_balances(conn: sqlite3.Connection, fiscal_year_id: int) -> dict[tupl
 
 
 def description_kana(conn: sqlite3.Connection, client_id: int) -> dict[str, str]:
-    """摘要プリセットの「かな」。摘要順の並べ替えで五十音順にするために使う。"""
-    return {r["text"]: r["kana"] for r in conn.execute(
-        "SELECT text, kana FROM descriptions WHERE client_id=? AND kana<>''", (client_id,)).fetchall()}
+    """摘要・取引先名の読み。摘要順・取引先名順の並べ替えで五十音順にするために使う。
+
+    摘要プリセットの「かな」を優先し、無ければ仕訳入力で覚えた読みを使う。
+    """
+    kana = {r["text"]: r["kana"] for r in conn.execute(
+        "SELECT text, kana FROM description_readings WHERE client_id=?", (client_id,)).fetchall()}
+    kana.update({r["text"]: r["kana"] for r in conn.execute(
+        "SELECT text, kana FROM descriptions WHERE client_id=? AND kana<>''", (client_id,)).fetchall()})
+    return kana
+
+
+def _yomi(s: str) -> str:
+    """並べ替え用に読みをそろえる: 半角カナ・全角英数を全角に、カタカナをひらがなに、空白は除く。"""
+    s = unicodedata.normalize("NFKC", s or "")
+    return "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in s if not c.isspace())
 
 
 def description_sort_key(kana: dict[str, str]):
-    """摘要の並び替えキー。かなが登録されていれば五十音順、摘要なしは最後。"""
-    return lambda d: (d == "", kana.get(d, d), d)
+    """摘要・取引先名の並び替えキー。読みがあれば五十音順 (半角カナも同じ並び)、空欄は最後。"""
+    return lambda d: (d == "", _yomi(kana.get(d, d)), d)
 
 
 def signed(p: Posting) -> int:
@@ -237,8 +250,9 @@ def ledger(conn: sqlite3.Connection, fiscal_year_id: int, account_id: int, date_
            sub_id: int | None = None, sort: str = "date") -> dict:
     """総勘定元帳 / 補助元帳。
 
-    sort="description" にすると摘要順に並べ替え、同じ摘要ごとに小計を付ける。
-    残高欄は日付順に積み上げた金額なので、摘要順のときは意味を持たないため出さない。
+    sort="description" にすると摘要順、sort="partner" にすると取引先名順に並べ替え、
+    同じ摘要 (取引先名) ごとに小計を付ける。グループ内は日付順。
+    残高欄は日付順に積み上げた金額なので、並べ替えたときは意味を持たないため出さない。
     """
     fy = conn.execute("SELECT * FROM fiscal_years WHERE id=?", (fiscal_year_id,)).fetchone()
     accts = accounts_map(conn, fy["client_id"])
@@ -283,18 +297,18 @@ def ledger(conn: sqlite3.Connection, fiscal_year_id: int, account_id: int, date_
             "balance": bal if ns == "D" else -bal,
         })
     groups = []
-    if sort == "description":
-        # 摘要ごとにまとめ、各グループの小計を添える
-        by_desc: dict[str, list] = {}
+    if sort in ("description", "partner"):
+        # 摘要 (取引先名) ごとにまとめ、各グループの小計を添える
+        by_key: dict[str, list] = {}
         for r in out:
-            by_desc.setdefault(r["description"], []).append(r)
+            by_key.setdefault(r[sort], []).append(r)
         ordered = []
         key = description_sort_key(description_kana(conn, fy["client_id"]))
-        for desc in sorted(by_desc, key=key):
-            rows_of = by_desc[desc]
+        for k in sorted(by_key, key=key):
+            rows_of = by_key[k]
             ordered.extend(rows_of)
             groups.append({
-                "description": desc, "count": len(rows_of),
+                "key": k, sort: k, "count": len(rows_of),
                 "debit": sum(x["debit"] for x in rows_of),
                 "credit": sum(x["credit"] for x in rows_of),
             })

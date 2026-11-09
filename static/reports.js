@@ -252,7 +252,7 @@ routes.ledger = async function (main, params) {
     <div class="field"><span>補助科目</span><select id="l-sub"><option value="">(科目合計)</option></select></div>
     ${periodToolbar('l', { from: params.from, to: params.to })}
     <div class="field"><span>並び順</span><select id="l-sort">
-      <option value="date">日付順</option><option value="description">摘要順</option></select></div>
+      <option value="date">日付順</option><option value="description">摘要順</option><option value="partner">取引先名順</option></select></div>
     <button id="l-prev" title="前の科目">◀</button><button id="l-next" title="次の科目">▶</button>
     ${printButton()} ${csvButton('l-csv')} ${backButtonHtml()}
   </div>
@@ -282,21 +282,24 @@ routes.ledger = async function (main, params) {
     shown = r.rows.map(x => x.entry_id);
     const a = r.account;
     $('#l-title').innerHTML = reportHeader(`${subSel.value ? '補助元帳' : '総勘定元帳'}　${a.code} ${a.name}${r.sub ? ' / ' + r.sub.name : ''}`,
-      `${fmtDate($('#l-from').value)} 〜 ${fmtDate($('#l-to').value)}${sort === 'description' ? '　摘要順' : ''}`);
-    const byDesc = sort === 'description';
-    // 摘要順では残高欄が意味を持たないので出さず、代わりに摘要ごとの小計を挟む
+      `${fmtDate($('#l-from').value)} 〜 ${fmtDate($('#l-to').value)}${sort === 'description' ? '　摘要順' : sort === 'partner' ? '　取引先名順' : ''}`);
+    // 摘要順・取引先名順では、まとまりごとに小計を挟む。残高欄は日付順でないと意味を持たないので出さない
+    const byDesc = sort === 'description' || sort === 'partner';
+    const field = sort;                                      // まとめる項目 (description / partner)
+    const blank = sort === 'partner' ? '(取引先名なし)' : '(摘要なし)';
     $('#l-table thead th:last-child').textContent = byDesc ? '' : '残高';
     const rows = byDesc ? []
       : [`<tr class="subtotal"><td colspan="6">前期繰越 / 期間前残高</td><td></td><td></td>${fmtCell0(r.opening)}</tr>`];
     let curDesc = null;
-    const groupOf = (d) => (r.groups || []).find(g => g.description === d);
+    const groupOf = (d) => (r.groups || []).find(g => g.key === d);
+    const subtotalRow = (k) => {
+      const g = groupOf(k);
+      return g ? `<tr class="subtotal"><td colspan="6">${esc(k || blank)} 小計 (${g.count} 件)</td>${fmtCell0(g.debit)}${fmtCell0(g.credit)}<td></td></tr>` : '';
+    };
     for (const x of r.rows) {
-      if (byDesc && x.description !== curDesc) {
-        if (curDesc !== null) {
-          const g = groupOf(curDesc);
-          if (g) rows.push(`<tr class="subtotal"><td colspan="6">${esc(curDesc || '(摘要なし)')} 小計 (${g.count} 件)</td>${fmtCell0(g.debit)}${fmtCell0(g.credit)}<td></td></tr>`);
-        }
-        curDesc = x.description;
+      if (byDesc && x[field] !== curDesc) {
+        if (curDesc !== null) rows.push(subtotalRow(curDesc));
+        curDesc = x[field];
       }
       rows.push(`<tr class="clickable" data-id="${x.entry_id}">
         <td class="code">${fmtDate(x.date)}</td><td class="num">${x.voucher_no}</td>
@@ -304,10 +307,7 @@ routes.ledger = async function (main, params) {
         <td>${esc(x.partner || '')}</td><td>${esc(x.description)}${x.sub_name && !subSel.value ? ` <span class="muted">(${esc(x.sub_name)})</span>` : ''}</td>
         ${fmtCell(x.debit)}${fmtCell(x.credit)}${byDesc ? '<td></td>' : fmtCell0(x.balance)}</tr>`);
     }
-    if (byDesc && curDesc !== null) {
-      const g = groupOf(curDesc);
-      if (g) rows.push(`<tr class="subtotal"><td colspan="6">${esc(curDesc || '(摘要なし)')} 小計 (${g.count} 件)</td>${fmtCell0(g.debit)}${fmtCell0(g.credit)}<td></td></tr>`);
-    }
+    if (byDesc && curDesc !== null) rows.push(subtotalRow(curDesc));
     rows.push(`<tr class="total"><td colspan="6">期間合計${byDesc ? '' : ' / 残高'}</td>${fmtCell0(r.total_debit)}${fmtCell0(r.total_credit)}${byDesc ? '<td></td>' : fmtCell0(r.closing)}</tr>`);
     $('#l-table tbody').innerHTML = rows.join('');
   }

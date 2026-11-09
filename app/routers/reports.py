@@ -26,8 +26,8 @@ def trial_balance(fy_id: int, date_from: str | None = None, date_to: str | None 
 @router.get("/fiscal-years/{fy_id}/reports/ledger")
 def ledger(fy_id: int, account_id: int, date_from: str | None = None, date_to: str | None = None,
            sub_id: int | None = None, sort: str = "date"):
-    if sort not in ("date", "description"):
-        raise HTTPException(400, "sort は date / description のいずれか")
+    if sort not in ("date", "description", "partner"):
+        raise HTTPException(400, "sort は date / description / partner のいずれか")
     with db() as conn:
         fy = _fy(conn, fy_id)
         return posting.ledger(conn, fy_id, account_id, date_from or fy["start_date"], date_to or fy["end_date"],

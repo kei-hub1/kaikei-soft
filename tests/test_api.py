@@ -1525,3 +1525,23 @@ def test_journal_list_filters_by_sub_account(client):
                                params={"account_id": acc["111"]["id"], "sub_id": sid}).json()["total"]
     assert q(a["id"]) == 1 and q(b["id"]) == 2
     assert client.get(f"/api/clients/{cl['id']}/entries", params={"account_id": acc["111"]["id"]}).json()["total"] == 3
+
+
+def test_ledger_sorted_by_partner(client):
+    """総勘定元帳の取引先名順: 取引先名ごとにまとめて小計を付ける。半角カナも五十音で並ぶ。空欄は最後。"""
+    cl, fy, acc = make_client(client)
+    d = fy["start_date"]
+    nxt = (date.fromisoformat(d) + timedelta(days=1)).isoformat()
+    for day, partner, amt in ((nxt, "ﾔﾏﾀﾞｼｮｳｼﾞ", 300), (d, "", 50), (d, "あおば商店", 100),
+                              (d, "ヤマダショウジ", 200), (nxt, "あおば商店", 400)):
+        client.post(f"/api/clients/{cl['id']}/entries", json={"entry_date": day, "lines": [
+            {"debit_account_id": acc["617"]["id"], "credit_account_id": acc["100"]["id"], "amount": amt,
+             "partner": partner, "description": "仕入"}]}).raise_for_status()
+    led = client.get(f"/api/fiscal-years/{fy['id']}/reports/ledger",
+                     params={"account_id": acc["617"]["id"], "sort": "partner"}).json()
+    assert [(g["key"], g["count"], g["debit"]) for g in led["groups"]] == [
+        ("あおば商店", 2, 500), ("ヤマダショウジ", 1, 200), ("ﾔﾏﾀﾞｼｮｳｼﾞ", 1, 300), ("", 1, 50)]
+    # グループ内は日付順
+    assert [x["debit"] for x in led["rows"]] == [100, 400, 200, 300, 50]
+    assert client.get(f"/api/fiscal-years/{fy['id']}/reports/ledger",
+                      params={"account_id": acc["617"]["id"], "sort": "x"}).status_code == 400
