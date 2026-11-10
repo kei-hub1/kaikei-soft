@@ -353,6 +353,7 @@ class App:
         months, warnings = [], []
         for ym in yms:
             month_rows = groups.get(ym, [])
+            errors += [f"{ym_label(ym)}: {e}" for e in z.apply_tax(month_rows, cfg)]
             more_errors, more_warnings = z.validate(month_rows, header, cfg)
             errors += [f"{ym_label(ym)}: {e}" for e in more_errors]
             warnings += [f"{ym_label(ym)}: {w}" for w in more_warnings]

@@ -241,7 +241,7 @@ def validate(rows: list[Row], header: list[str], cfg: dict) -> tuple[list[str], 
     """（誤り, 注意）を返す。誤りが1件でもあれば入力しない。"""
     errors, warnings = [], []
     steps: list[Step] = cfg["steps"]
-    known = set(header) | {"年", "月", "日", "金額"}
+    known = set(header) | {"年", "月", "日", "金額", *TAX_FIELDS}
 
     for step in steps:
         for t in step.templates():
@@ -266,6 +266,9 @@ def validate(rows: list[Row], header: list[str], cfg: dict) -> tuple[list[str], 
         for col, codes in allowed.items():
             if codes is not None and col in v and v[col] not in codes:
                 errors.append(f"{where}: {col}「{v[col]}」は入力対象外です（対象: {', '.join(codes)}）")
+        for col in allowed:
+            if not v.get(col, ""):
+                errors.append(f"{where}: {col}が空です")
         if not re.fullmatch(r"\d+", v["金額"]) or int(v["金額"]) == 0:
             errors.append(f"{where}: 金額「{v.get(cfg.get('csv', {}).get('amount_column', '金額'))}」が正の整数ではありません")
         for col, limit in max_bytes.items():
@@ -297,6 +300,45 @@ def validate(rows: list[Row], header: list[str], cfg: dict) -> tuple[list[str], 
 
 
 SIDES = (("借方", "借方科目コード", "借方補助コード"), ("貸方", "貸方科目コード", "貸方補助コード"))
+
+
+# 税区分まわりで、CSV と関与先の設定（課税／免税）から決まる値。[[steps]] の条件や {…} で使う
+TAX_FIELDS = ("入力する税区分", "入力する事業区分", "仕入日あり")
+
+
+def apply_tax(rows: list[Row], cfg: dict) -> list[str]:
+    """行ごとに、税区分・事業区分として打つ値と、仕入日の欄が開くかどうかを決める。誤りの一覧を返す。
+
+    免税の関与先では税区分の欄がないため、どれも空にする。
+    課税の関与先では CSV の税区分をそのまま打つ。空のときは、消費税に関係しない科目だけの行に限り「0」とする。
+    """
+    tax = cfg.get("tax", {})
+    code_col = tax.get("code_column", "税区分")
+    biz_col = tax.get("business_column", "事業区分")
+    zero_accounts = set(tax.get("zero_accounts", ["9411", "9311", "1113"]))
+    purchase_codes = {str(c) for c in tax.get("purchase_date_codes", [])}
+    errors = []
+    for row in rows:
+        v = row.values
+        v.update({f: "" for f in TAX_FIELDS})
+        if v.get("消費税") != "課税":
+            continue
+        code = v.get(code_col, "").strip()
+        if not code:
+            accounts = {v.get("借方科目コード", ""), v.get("貸方科目コード", "")}
+            if not accounts <= zero_accounts:
+                errors.append(f"{row.line}行目: {code_col}が空です（借方{v.get('借方科目コード', '')}／"
+                              f"貸方{v.get('貸方科目コード', '')}）。CSV の「{code_col}」の列に番号を入れてください")
+                continue
+            code = "0"
+        biz = v.get(biz_col, "").strip()
+        for name, value in ((code_col, code), (biz_col, biz)):
+            if value and not re.fullmatch(r"[0-9]+", value):
+                errors.append(f"{row.line}行目: {name}「{value}」は半角の数字で入れてください")
+        v["入力する税区分"] = code
+        v["入力する事業区分"] = biz
+        v["仕入日あり"] = "はい" if code in purchase_codes else ""
+    return errors
 
 
 def bank_account(cfg: dict) -> str:
@@ -417,6 +459,7 @@ def account_label(values: dict[str, str], side: str) -> str:
 def row_summary(row: Row) -> str:
     v = row.values
     return (f"CSV {row.line}行目  {row.date:%Y/%m/%d}  "
+            f"{'税' + v['入力する税区分'] + '  ' if v.get('入力する税区分') else ''}"
             f"借方{account_label(v, '借方')} / 貸方{account_label(v, '貸方')}  "
             f"{int(v['金額']):,}円  {v.get('取引先名', '')}  {v.get('摘要', '')}")
 
@@ -810,6 +853,7 @@ def main(argv: list[str] | None = None) -> int:
         month_label = f"{year}-{month:02d}" if year else f"{month:02d}"
         header, all_rows, errors = load_rows(args.csv, cfg, {"消費税": args.tax})
         errors += apply_sub_code(all_rows, bank_account(cfg), args.sub_code)
+        errors += apply_tax(filter_month(all_rows, year, month), cfg)
         rows = filter_month(all_rows, year, month)
         # 日付を読めない行は、どの月か分からないため、月に関係なく誤りとする
         more_errors, warnings = validate(rows, header, cfg)
