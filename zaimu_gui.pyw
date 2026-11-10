@@ -40,6 +40,27 @@ def progress_path(csv_path: Path, ym: tuple[int, int], practice: bool) -> Path:
     return RECORD_DIR / f"{csv_path.stem}_{key}_{ym[0]}-{ym[1]:02d}{suffix}.json"
 
 
+def find_progress(csv_path: Path, ym: tuple[int, int], practice: bool, rows: list[z.Row]) -> z.Progress:
+    """その CSV・その月の記録を開く。
+
+    CSV を別のフォルダーへ移したり名前を変えたりすると、記録ファイルの名前が合わなくなる。
+    そのままだと「未入力」に見えて二重に入力してしまうため、中身（入力済みの仕訳）が一致する記録が
+    ほかにあれば、それを引き継ぐ。
+    """
+    month_label = f"{ym[0]}-{ym[1]:02d}"
+    path = progress_path(csv_path, ym, practice)
+    if not path.exists() and RECORD_DIR.exists():
+        suffix = "_練習" if practice else ""
+        for other in sorted(RECORD_DIR.glob(f"*_{month_label}{suffix}.json")):
+            try:
+                if z.Progress(other, month_label).matches(rows):
+                    other.rename(path)
+                    break
+            except (OSError, ValueError):
+                continue
+    return z.Progress(path, month_label)
+
+
 def ym_label(ym: tuple[int, int]) -> str:
     return f"{ym[0]}年{ym[1]}月"
 
@@ -291,28 +312,26 @@ class App:
             return
         for e in errors:
             self.write(f"× {e}")
-        csv_hash = hashlib.sha256(self.csv.read_bytes()).hexdigest()
         for ym, month_rows in z.group_by_month(rows).items():
             iid = f"{ym[0]}-{ym[1]:02d}"
             self.months[iid] = ym
-            state = self.month_state(ym, month_rows, csv_hash)
+            state = self.month_state(ym, month_rows)
             self.month_tree.insert("", "end", iid=iid, values=(ym_label(ym), len(month_rows), state))
         if selected and selected[0] in self.months:
             self.month_tree.selection_set(selected[0])
         elif len(self.months) == 1:
             self.month_tree.selection_set(next(iter(self.months)))
 
-    def month_state(self, ym, rows: list[z.Row], csv_hash: str) -> str:
-        pp = progress_path(self.csv, ym, practice=False)
-        if not pp.exists():
+    def month_state(self, ym, rows: list[z.Row]) -> str:
+        prog = find_progress(self.csv, ym, False, rows)
+        if not prog.data:
             return "未入力"
-        prog = z.Progress(pp, csv_hash, "")
-        done = sum(1 for r in rows if r.line <= prog.last_completed)
+        done, problem = prog.resolve(rows)
+        if problem:
+            return "入力済みの仕訳が CSV の中で変わっています（入力開始で詳しく表示）"
         state = "入力済み" if done == len(rows) else ("未入力" if done == 0 else f"{done}件まで入力済み")
         if prog.in_progress:
             state += "（前回、途中で終了）"
-        if prog.data.get("csv_sha256") != csv_hash:
-            state += "（入力後に CSV が変更されています）"
         return state
 
     def selected_month(self) -> tuple[int, int] | None:
@@ -394,13 +413,22 @@ class App:
                 self.write(f"  {line}")
         if len(g["months"]) > 1:
             self.write("\n月の切り替え:")
+            yms = [m["ym"] for m in g["months"]]
             if g["cfg"]["month_switch"]:
-                for line in z.plan_lines(g["cfg"]["month_switch"], z.month_switch_values(g["months"][1]["ym"])):
+                for line in z.plan_lines(g["cfg"]["month_switch"], z.month_switch_values(yms[0], yms[1])):
                     self.write(f"  {line}")
+                for note in self.gap_notes(yms):
+                    self.write(f"  ※ {note}")
             else:
                 self.write("  月の変わり目で一時停止します（手で次の月に切り替えてから PgUp）")
         self.write("\n問題ありません。（「確認」ではキーは送っていません）")
         self.status_var.set("確認しました")
+
+    @staticmethod
+    def gap_notes(yms: list[tuple[int, int]]) -> list[str]:
+        """月が続いていないところ。自動の切り替えは「次の月」にしか使えないため、そこでは一時停止する。"""
+        return [f"{a[1]}月分のあとは{b[1]}月分で、月が続いていないため、一時停止します（手で切り替えて PgUp）"
+                for a, b in zip(yms, yms[1:]) if not z.is_next_month(a, b)]
 
     def start(self, practice: bool):
         if self.running:
@@ -415,14 +443,22 @@ class App:
                                      parent=self.root)
             return
         path = g["path"]
-        csv_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        plan = []   # まだ入力していない仕訳がある月だけ
+        plan, problems = [], []   # plan は、まだ入力していない仕訳がある月だけ
         for m in g["months"]:
             ym = m["ym"]
-            progress = z.Progress(progress_path(path, ym, practice), csv_hash, f"{ym[0]}-{ym[1]:02d}")
-            rows = [r for r in m["rows"] if r.line > progress.last_completed]
-            if rows:
-                plan.append(dict(ym=ym, rows=rows, progress=progress, done=len(m["rows"]) - len(rows)))
+            progress = find_progress(path, ym, practice, m["rows"])
+            done, problem = progress.resolve(m["rows"])
+            if problem:
+                problems.append(f"{ym_label(ym)}: {problem}")
+            elif done < len(m["rows"]):
+                plan.append(dict(ym=ym, rows=m["rows"], start=done, todo=len(m["rows"]) - done, progress=progress))
+        if problems:
+            self.write("\n次の理由で、入力できません。")
+            for e in problems:
+                self.write(f"× {e}")
+            messagebox.showerror("自動入力", "前回の入力の記録と CSV が合わないため、入力できません。下の欄を見てください。",
+                                 parent=self.root)
+            return
         if not plan:
             messagebox.showinfo("自動入力", "選んだ月の仕訳はすべて入力済みです。\n"
                                 "やり直すときは「この月の記録を消す」を押してください。", parent=self.root)
@@ -432,13 +468,17 @@ class App:
         first_ym = plan[0]["ym"]
         lines = [f"CSV：{path.name}　消費税：{g['tax']}", f"普通預金の補助コード：{g['sub']}", ""]
         for m in plan:
-            lines.append(f"{ym_label(m['ym'])}：{len(m['rows'])}件"
-                         + (f"（入力済みの{m['done']}件は飛ばします）" if m["done"] else ""))
+            lines.append(f"{ym_label(m['ym'])}：{m['todo']}件"
+                         + (f"（入力済みの{m['start']}件は飛ばします）" if m["start"] else ""))
         if len(plan) > 1:
             how = "自動で切り替えます" if g["cfg"]["month_switch"] else "一時停止します（手で切り替えて PgUp）"
             lines += ["", f"月の変わり目では、財務エントリの月を{how}。"]
+            if g["cfg"]["month_switch"]:
+                lines += [f"※ {note}" for note in self.gap_notes([m["ym"] for m in plan])]
         if plan[0]["progress"].in_progress:
-            lines += ["", f"※ 前回は CSV {plan[0]['progress'].in_progress}行目の入力途中で終了しています。",
+            # 記録にある行番号は、CSV の行がずれると古くなる。途中だったのは、次に入力する仕訳
+            line = plan[0]["rows"][plan[0]["start"]].line
+            lines += ["", f"※ 前回は CSV {line}行目の入力途中で終了しています。",
                       "入力途中の行が残っていれば、先に手で消してください。"]
         if g["warnings"]:
             lines += ["", f"※ 注意が{len(g['warnings'])}件あります（下の欄を見てください）。"]
@@ -465,7 +505,7 @@ class App:
 
     def worker(self, cfg, target, plan, practice, path, first_field, options):
         kind = "練習" if practice else "本番"
-        current = plan[0]
+        current, sender = plan[0], None
         try:
             win = z.Win()
             sender = z.Sender(cfg, win)
@@ -479,21 +519,22 @@ class App:
                     if i > 0:
                         self.post(f"\n── {ym[1]}月分に切り替えます")
                         self.queue.put(("status", f"{ym[1]}月分に切り替え中…"))
-                        runner.switch_month(ym, first_field)
-                    header = f"開始（{kind}）  {path}  {progress.month_label}  CSV {rows[0].line}行目から"
-                    self.post(f"\n── {ym_label(ym)}（{len(rows)}件）")
+                        runner.switch_month(plan[i - 1]["ym"], ym, first_field)
+                    first_line = rows[current["start"]].line
+                    header = f"開始（{kind}）  {path}  {progress.month_label}  CSV {first_line}行目から"
+                    self.post(f"\n── {ym_label(ym)}（{current['todo']}件）")
                     z.write_log(header, LOG_FILE)
                     if options["trace_file"]:
                         z.write_log(f"──── {header}", options["trace_file"])
                     label = ym_label(ym)
-                    runner.run_rows(rows, progress, notify=self.post, log_file=LOG_FILE,
+                    runner.run_rows(rows, current["start"], progress, notify=self.post, log_file=LOG_FILE,
                                     on_row_done=lambda n, t, label=label: self.queue.put(
                                         ("status", f"{label} 入力中… {n}/{t}件 完了")),
                                     stop_each_row=options["stop_each_row"])
-                    z.write_log(f"終了（{kind}）  {progress.month_label}  {len(rows)}件", LOG_FILE)
+                    z.write_log(f"終了（{kind}）  {progress.month_label}  {current['todo']}件", LOG_FILE)
             finally:
                 self.ctl.uninstall()
-            total = sum(len(m["rows"]) for m in plan)
+            total = sum(m["todo"] for m in plan)
             self.post(f"\n✔ すべて入力しました（{len(plan)}か月・{total}件）。")
             self.queue.put(("status", f"終了しました（{len(plan)}か月・{total}件）"))
         except z.Cancelled:
@@ -508,6 +549,8 @@ class App:
             self.post("\nエラーで止まりました:\n" + traceback.format_exc())
             self.queue.put(("status", "エラーで止まりました"))
         finally:
+            if sender:
+                sender.clear_clipboard()
             self.ctl = None
             self.queue.put(("done", None))
 

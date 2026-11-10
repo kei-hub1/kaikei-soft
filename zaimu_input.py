@@ -9,6 +9,7 @@ import argparse
 import csv
 import datetime as dt
 import hashlib
+import io
 import json
 import re
 import string
@@ -112,10 +113,18 @@ def parse_steps(raws: list[dict], section: str) -> list[Step]:
 MONTH_SWITCH_FIELDS = {"年", "月", "前の月"}
 
 
-def month_switch_values(ym: tuple[int, int]) -> dict[str, str]:
-    """切り替え先の月（ym）の値。{月} は切り替え先の月、{前の月} は入力し終えた月。"""
-    prev = 12 if ym[1] == 1 else ym[1] - 1
-    return {"年": str(ym[0]), "月": str(ym[1]), "前の月": str(prev)}
+def month_switch_values(prev: tuple[int, int], ym: tuple[int, int]) -> dict[str, str]:
+    """{月} は切り替え先の月（ym）、{前の月} は入力し終えた月（prev）。"""
+    return {"年": str(ym[0]), "月": str(ym[1]), "前の月": str(prev[1])}
+
+
+def is_next_month(prev: tuple[int, int], ym: tuple[int, int]) -> bool:
+    """ym が、同じ年の、prev のすぐ次の月か。
+
+    月の切り替えの操作は「一覧で1行下を選ぶ」ものなので、月が飛ぶとき（1月→3月）や
+    年をまたぐときに使うと、違う月の画面に入力してしまう。
+    """
+    return prev[0] == ym[0] and ym[1] == prev[1] + 1
 
 
 def check_month_switch(steps: list[Step]):
@@ -132,6 +141,10 @@ def check_month_switch(steps: list[Step]):
 # ─────────────────────────────────────────────
 # CSV
 # ─────────────────────────────────────────────
+
+# CSV になくてもよい列（補助コードは画面で指定でき、税区分・事業区分は使わない関与先もある）
+OPTIONAL_COLUMNS = ("借方補助コード", "貸方補助コード")
+
 
 @dataclass
 class Row:
@@ -178,11 +191,18 @@ def load_rows(path: Path, cfg: dict, extra: dict[str, str] | None = None) -> tup
     except FileNotFoundError:
         raise UserError(f"CSV が見つかりません: {path}")
 
-    reader = csv.reader(text.splitlines())
+    # splitlines() で分けると、セルの中に改行がある行（伝票メモなど）がずれるため、csv に行の区切りを任せる
+    reader = csv.reader(io.StringIO(text, newline=""))
     header = [h.strip() for h in next(reader, [])]
+    duplicated = sorted({h for h in header if h and header.count(h) > 1})
+    if duplicated:
+        raise UserError(f"CSV の見出しに同じ名前の列が2つあります: {', '.join(duplicated)}")
     for col in (date_col, amount_col):
         if col not in header:
             raise UserError(f"CSV の見出しに「{col}」がありません。見出し: {', '.join(header)}")
+
+    # 空欄でよい列は、CSV に列そのものがなくても、空欄として扱う
+    header += [col for col in OPTIONAL_COLUMNS if col not in header]
 
     rows, errors = [], []
     for line, cells in enumerate(reader, start=2):
@@ -575,6 +595,13 @@ class Sender:
             raise RuntimeError("クリップボードに文字を入れられませんでした")
         self.send_keys("^v", pause=0, vk_packet=False)
 
+    def clear_clipboard(self):
+        """最後に貼り付けた取引先名・摘要を、クリップボードに残さない。"""
+        try:
+            self.pyperclip.copy("")
+        except Exception:
+            pass
+
 
 class Controller:
     """PgDn / PgUp による一時停止・再開と、入力先ウィンドウの確認。"""
@@ -634,16 +661,39 @@ class Controller:
         self.paused = True
         self.notify(f"■ {message}\n  再開: {self.resume_label}　／　終了: {self.quit_hint}")
 
+    def _is_entry_window(self, title: str) -> bool:
+        """入力を始めてよい画面（財務エントリなら「会計伝票」）か。"""
+        want_exact, want_part = self.target.get("title"), self.target.get("title_contains")
+        return bool((want_exact and title == want_exact) or (want_part and want_part in title))
+
+    def wait_for_entry_window(self, timeout: float, what: str):
+        """入力を始めてよい画面が最前面に出るまで待つ。出なければ止まって、人に確かめてもらう。"""
+        end = time.monotonic() + timeout
+        while True:
+            if self.cancelled:
+                raise Cancelled
+            _, title, pid = self.win.foreground()
+            if self.paused or time.monotonic() > end:
+                if not self.paused:
+                    self.stop(f"{what}が開いたことを確かめられませんでした（今の最前面:「{title}」）。"
+                              f"財務エントリの画面を確かめ、{what}を開いてカーソルを置いてから "
+                              f"{self.resume_label} を押してください")
+                self.checkpoint()   # 人が確かめて再開した
+                return
+            if self._is_entry_window(title):
+                self.target_pid = pid
+                return
+            time.sleep(0.1)
+
     def _target_ok(self) -> tuple[bool, str]:
         _, title, pid = self.win.foreground()
         allowed = self.target.get("allowed_titles") or []
         if self.target_pid is None:
-            want_exact, want_part = self.target.get("title"), self.target.get("title_contains")
-            if (want_exact and title == want_exact) or (want_part and want_part in title):
+            if self._is_entry_window(title):
                 self.target_pid = pid
                 return True, ""
-            return False, (f"最前面のウィンドウが入力先ではありません（今:「{title}」／"
-                           f"必要:「{want_exact or want_part}」）")
+            want = self.target.get("title") or self.target.get("title_contains")
+            return False, f"最前面のウィンドウが入力先ではありません（今:「{title}」／必要:「{want}」）"
         if pid != self.target_pid:
             return False, f"最前面のウィンドウが入力先ではないため停止しました（今:「{title}」）"
         if allowed and title not in allowed:
@@ -677,26 +727,69 @@ class Controller:
 # 進み具合の記録
 # ─────────────────────────────────────────────
 
+def row_signature(row: Row) -> str:
+    """仕訳1件の中身。入力済みの仕訳が、あとで CSV の中で変わっていないかを確かめるのに使う。"""
+    v = row.values
+    return "\t".join([row.date.isoformat(), v.get("借方科目コード", ""), v.get("貸方科目コード", ""),
+                      v.get("金額", ""), v.get("取引先名", ""), v.get("摘要", "")])
+
+
+def rows_digest(rows: list[Row]) -> str:
+    h = hashlib.sha256()
+    for row in rows:
+        h.update(row_signature(row).encode("utf-8") + b"\n")
+    return h.hexdigest()
+
+
 class Progress:
-    def __init__(self, path: Path, csv_hash: str, month_label: str):
-        self.path, self.csv_hash, self.month_label = path, csv_hash, month_label
-        self.data = {}
+    """1つの CSV の1か月分について、どこまで入力したかの記録。
+
+    CSV の行番号ではなく、「その月の最初の何件を入力したか」と、その仕訳の中身の要約（digest）で覚える。
+    こうしておくと、入力の途中で CSV の行を足したり消したりしても、行がずれて二重に入力したり
+    飛ばしたりしない。入力済みの仕訳そのものが変わっていれば、気づいて止められる。
+    """
+
+    def __init__(self, path: Path, month_label: str):
+        self.path, self.month_label = path, month_label
+        self.data: dict = {}
         if path.exists():
             self.data = json.loads(path.read_text(encoding="utf-8"))
 
     @property
     def last_completed(self) -> int:
+        """最後に入力し終えた仕訳の、CSV 上の行番号（表示用）。"""
         return self.data.get("last_completed_line", 0)
 
     @property
     def in_progress(self) -> int | None:
         return self.data.get("in_progress_line")
 
-    def save(self, last_completed: int, in_progress: int | None):
+    def matches(self, rows: list[Row]) -> bool:
+        """この記録が、rows（その月の全仕訳）の最初の何件かを入力したものか。"""
+        count = self.data.get("completed_count")
+        return (isinstance(count, int) and 0 < count <= len(rows)
+                and self.data.get("digest") == rows_digest(rows[:count]))
+
+    def resolve(self, rows: list[Row]) -> tuple[int, str | None]:
+        """rows（その月の全仕訳）のうち、入力済みの件数を返す。記録と CSV が合わないときは理由も返す。"""
+        if not self.data:
+            return 0, None
+        if "completed_count" not in self.data:
+            # 以前の版の記録（行番号だけ）。中身は確かめられない
+            return sum(1 for r in rows if r.line <= self.last_completed), None
+        count = self.data["completed_count"]
+        if count == 0 or self.matches(rows):
+            return count, None
+        return 0, (f"前回入力した仕訳（最初の{count}件）が、CSV の中で変わっています。"
+                   f"CSV を元に戻すか、財務エントリに入力済みの仕訳を確かめたうえで、この月の記録を消してください")
+
+    def save(self, rows: list[Row], count: int, in_progress: int | None):
+        """rows の最初の count 件を入力し終えた、と記録する。in_progress は入力途中の行番号。"""
         self.data = {
-            "csv_sha256": self.csv_hash,
             "month": self.month_label,
-            "last_completed_line": last_completed,
+            "completed_count": count,
+            "digest": rows_digest(rows[:count]),
+            "last_completed_line": rows[count - 1].line if count else 0,
             "in_progress_line": in_progress,
             "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
         }
@@ -773,45 +866,47 @@ class Runner:
                 ctl.stop(f"手作業: {a.value}（{where}「{a.step}」）")
                 ctl.checkpoint()
 
-    def switch_month(self, ym: tuple[int, int], first_field: str):
-        """財務エントリを ym の月に切り替える。[[month_switch]] がなければ、止まって手での切り替えを待つ。"""
+    def switch_month(self, prev: tuple[int, int], ym: tuple[int, int], first_field: str):
+        """財務エントリを、prev の月から ym の月に切り替える。
+
+        [[month_switch]] がないときと、ym が prev のすぐ次の月でないときは、止まって手での切り替えを待つ。
+        """
         where = f"{ym[1]}月分への切り替え"
-        if not self.cfg["month_switch"]:
+        if not self.cfg["month_switch"] or not is_next_month(prev, ym):
             self.ctl.position = where
-            prev = month_switch_values(ym)["前の月"]
-            self.ctl.stop(f"{prev}月分が終わりました。財務エントリを{ym[1]}月分に切り替え、"
+            self.ctl.stop(f"{prev[1]}月分が終わりました。財務エントリを{ym[1]}月分に切り替え、"
                           f"カーソルを新しい行の「{first_field}」の欄に置いてから {self.ctl.resume_label} を押してください")
             self.ctl.checkpoint()
             return
         # 画面が開くのを待つ時間は、速さを上げても短くしない（画面の切り替えは速くならないため）
-        self.perform(build_actions(self.cfg["month_switch"], month_switch_values(ym)), where,
+        self.perform(build_actions(self.cfg["month_switch"], month_switch_values(prev, ym)), where,
                      wait_scale=max(self.speed, 1.0))
+        # 切り替えがずれたまま仕訳のキーを送ると、別の画面を操作してしまうため、開いた画面を確かめる
+        self.ctl.position = f"{ym[1]}月分の入力"
+        self.ctl.wait_for_entry_window(self.cfg.get("timing", {}).get("switch_timeout", 15),
+                                       f"{ym[1]}月分の入力画面")
 
-    def run_rows(self, rows: list[Row], progress: Progress, notify=print, log_file: Path = LOG_FILE,
-                 on_row_done=None, stop_each_row: bool = False):
-        """仕訳を順に入力する。stop_each_row: 1件入力するたびに一時停止する（PgUp で次へ）。"""
+    def run_rows(self, rows: list[Row], start: int, progress: Progress, notify=print,
+                 log_file: Path = LOG_FILE, on_row_done=None, stop_each_row: bool = False):
+        """rows（その月の全仕訳）のうち、start 件目より後を順に入力する。
+
+        stop_each_row: 1件入力するたびに一時停止する（PgUp で次へ）。
+        """
         ctl = self.ctl
-        last_done = progress.last_completed
-        for n, row in enumerate(rows, 1):
-            notify(f"[{n}/{len(rows)}] {row_summary(row)}")
-            progress.save(last_done, row.line)
+        total = len(rows) - start
+        for i in range(start, len(rows)):
+            row, n = rows[i], i - start + 1
+            notify(f"[{n}/{total}] {row_summary(row)}")
+            progress.save(rows, i, row.line)
             self.perform(build_actions(self.cfg["steps"], row.values), f"CSV {row.line}行目")
-            last_done = row.line
-            progress.save(last_done, None)
+            progress.save(rows, i + 1, None)
             write_log(f"完了  {row_summary(row)}", log_file)
             if on_row_done:
-                on_row_done(n, len(rows))
-            if stop_each_row and n < len(rows):
-                ctl.position = f"CSV {rows[n].line}行目"
+                on_row_done(n, total)
+            if stop_each_row and i + 1 < len(rows):
+                ctl.position = f"CSV {rows[i + 1].line}行目"
                 ctl.stop(f"1件入力しました（CSV {row.line}行目）。財務エントリの画面を確かめ、よければ {ctl.resume_label} で次の仕訳へ")
             time.sleep(self.row_wait)
-
-
-def run_rows(rows: list[Row], cfg: dict, ctl: Controller, sender: Sender, progress: Progress,
-             notify=print, log_file: Path = LOG_FILE, on_row_done=None,
-             speed: float = 1.0, stop_each_row: bool = False, trace_file: Path | None = None):
-    """1か月分の仕訳を入力する（コマンド版から使う）。"""
-    Runner(cfg, ctl, sender, speed, trace_file).run_rows(rows, progress, notify, log_file, on_row_done, stop_each_row)
 
 
 def watch_window():
@@ -853,8 +948,8 @@ def main(argv: list[str] | None = None) -> int:
         month_label = f"{year}-{month:02d}" if year else f"{month:02d}"
         header, all_rows, errors = load_rows(args.csv, cfg, {"消費税": args.tax})
         errors += apply_sub_code(all_rows, bank_account(cfg), args.sub_code)
-        errors += apply_tax(filter_month(all_rows, year, month), cfg)
         rows = filter_month(all_rows, year, month)
+        errors += apply_tax(rows, cfg)
         # 日付を読めない行は、どの月か分からないため、月に関係なく誤りとする
         more_errors, warnings = validate(rows, header, cfg)
         errors += more_errors
@@ -870,26 +965,25 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         # 再開位置
-        csv_hash = hashlib.sha256(args.csv.read_bytes()).hexdigest()
         suffix = "_notepad" if args.notepad else ""
-        progress = Progress(args.csv.with_name(f"{args.csv.stem}_{month_label}{suffix}.progress.json"),
-                            csv_hash, month_label)
-        start_after = 0
+        progress = Progress(args.csv.with_name(f"{args.csv.stem}_{month_label}{suffix}.progress.json"), month_label)
+        start = 0
         if args.from_line:
-            start_after = args.from_line - 1
+            start = sum(1 for r in rows if r.line < args.from_line)
         elif not args.reset and progress.data:
-            if progress.data.get("csv_sha256") != csv_hash:
-                print(f"\n※ 前回の記録（{progress.path.name}）のあとで CSV が変更されています。")
-            print(f"前回の記録: CSV {progress.last_completed}行目まで入力済み")
-            if progress.in_progress:
-                print(f"※ 前回は CSV {progress.in_progress}行目の入力途中で終了しています。"
+            start, problem = progress.resolve(rows)
+            if problem:
+                print(f"\n× {problem}（最初からやり直すときは --reset）")
+                return 1
+            print(f"前回の記録: {start}件（CSV {progress.last_completed}行目まで）入力済み")
+            if progress.in_progress and start < len(rows):
+                print(f"※ 前回は CSV {rows[start].line}行目の入力途中で終了しています。"
                       f"財務エントリに入力途中の行が残っていれば、手で消してから続けてください。")
-            start_after = progress.last_completed
-        rows = [r for r in rows if r.line > start_after]
-        if not rows:
+        todo = rows[start:]
+        if not todo:
             print("この月の仕訳はすべて入力済みです（最初からやり直すときは --reset）。")
             return 0
-        print(f"入力する仕訳: {len(rows)}件（CSV {rows[0].line}行目から {rows[-1].line}行目まで）")
+        print(f"入力する仕訳: {len(todo)}件（CSV {todo[0].line}行目から {todo[-1].line}行目まで）")
 
         if warnings:
             print("\n注意:")
@@ -897,7 +991,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  ! {w}")
 
         if args.dry_run:
-            for row in rows:
+            for row in todo:
                 print(f"\n── {row_summary(row)}")
                 for line in plan_lines(cfg["steps"], row.values):
                     print(f"   {line}")
@@ -921,9 +1015,9 @@ def main(argv: list[str] | None = None) -> int:
         where = "メモ帳" if args.notepad else f"財務エントリの「会計伝票」画面（カーソルは{first}の欄）"
         print(f"\n{where}をクリックしてから、{ctl.resume_label} を押すと入力を始めます。")
         print(f"途中で止めるときは {ctl.pause_label}、再開は {ctl.resume_label} です。")
-        write_log(f"開始  {args.csv}  {month_label}  {target_name}  CSV {rows[0].line}行目から")
+        write_log(f"開始  {args.csv}  {month_label}  {target_name}  CSV {todo[0].line}行目から")
         try:
-            run_rows(rows, cfg, ctl, sender, progress)
+            Runner(cfg, ctl, sender).run_rows(rows, start, progress)
         except (KeyboardInterrupt, Cancelled):
             print(f"\n終了しました。記録: CSV {progress.last_completed}行目まで入力済み")
             if progress.in_progress:
@@ -932,8 +1026,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         finally:
             ctl.uninstall()
-        print(f"\nすべて入力しました（{len(rows)}件）。")
-        write_log(f"終了  {len(rows)}件")
+            sender.clear_clipboard()
+        print(f"\nすべて入力しました（{len(todo)}件）。")
+        write_log(f"終了  {len(todo)}件")
         return 0
     except UserError as e:
         print(f"エラー: {e}")
