@@ -662,12 +662,20 @@ class Controller:
         self.notify(f"■ {message}\n  再開: {self.resume_label}　／　終了: {self.quit_hint}")
 
     def _is_entry_window(self, title: str) -> bool:
-        """入力を始めてよい画面（財務エントリなら「会計伝票」）か。"""
-        want_exact, want_part = self.target.get("title"), self.target.get("title_contains")
-        return bool((want_exact and title == want_exact) or (want_part and want_part in title))
+        """仕訳の入力を始めてよい画面か。
 
-    def wait_for_entry_window(self, timeout: float, what: str):
-        """入力を始めてよい画面が最前面に出るまで待つ。出なければ止まって、人に確かめてもらう。"""
+        財務エントリでは「会計伝票」。課税の関与先では、税区分の欄に入ると「課税区分一覧」が
+        すぐ前に出るので、それも含める（entry_titles）。
+        """
+        want_exact, want_part = self.target.get("title"), self.target.get("title_contains")
+        return bool((want_exact and title == want_exact) or title in (self.target.get("entry_titles") or [])
+                    or (want_part and want_part in title))
+
+    def wait_for_entry_window(self, timeout: float, problem: str):
+        """仕訳の入力を始めてよい画面が最前面に出るまで待つ。出なければ止まって、人に確かめてもらう。
+
+        problem: 出なかったときに知らせる文（何が起きたと考えられるか・どうしてほしいか）。
+        """
         end = time.monotonic() + timeout
         while True:
             if self.cancelled:
@@ -675,9 +683,7 @@ class Controller:
             _, title, pid = self.win.foreground()
             if self.paused or time.monotonic() > end:
                 if not self.paused:
-                    self.stop(f"{what}が開いたことを確かめられませんでした（今の最前面:「{title}」）。"
-                              f"財務エントリの画面を確かめ、{what}を開いてカーソルを置いてから "
-                              f"{self.resume_label} を押してください")
+                    self.stop(f"{problem}（今の最前面:「{title}」）")
                 self.checkpoint()   # 人が確かめて再開した
                 return
             if self._is_entry_window(title):
@@ -693,7 +699,8 @@ class Controller:
                 self.target_pid = pid
                 return True, ""
             want = self.target.get("title") or self.target.get("title_contains")
-            return False, f"最前面のウィンドウが入力先ではありません（今:「{title}」／必要:「{want}」）"
+            return False, (f"最前面のウィンドウが入力先ではありません（今:「{title}」／必要:「{want}」）。"
+                           f"入力先の画面をクリックしてから {self.resume_label} を押してください")
         if pid != self.target_pid:
             return False, f"最前面のウィンドウが入力先ではないため停止しました（今:「{title}」）"
         if allowed and title not in allowed:
@@ -883,8 +890,11 @@ class Runner:
                      wait_scale=max(self.speed, 1.0))
         # 切り替えがずれたまま仕訳のキーを送ると、別の画面を操作してしまうため、開いた画面を確かめる
         self.ctl.position = f"{ym[1]}月分の入力"
-        self.ctl.wait_for_entry_window(self.cfg.get("timing", {}).get("switch_timeout", 15),
-                                       f"{ym[1]}月分の入力画面")
+        self.ctl.wait_for_entry_window(
+            self.cfg.get("timing", {}).get("switch_timeout", 15),
+            f"{ym[1]}月分の入力画面が開いたことを確かめられませんでした。財務エントリの画面を確かめ、"
+            f"{ym[1]}月分の会計伝票を開いて、カーソルを新しい行の「{first_field}」の欄に置いてから "
+            f"{self.ctl.resume_label} を押してください")
 
     def run_rows(self, rows: list[Row], start: int, progress: Progress, notify=print,
                  log_file: Path = LOG_FILE, on_row_done=None, stop_each_row: bool = False):
@@ -897,6 +907,14 @@ class Runner:
         for i in range(start, len(rows)):
             row, n = rows[i], i - start + 1
             notify(f"[{n}/{total}] {row_summary(row)}")
+            # 前の仕訳の入力がずれて、一覧やメッセージの画面が残ったまま次を打つと、ずれが広がる。
+            # 仕訳の入力を始めてよい画面に戻っていることを確かめる
+            ctl.position = f"CSV {row.line}行目"
+            ctl.wait_for_entry_window(
+                self.cfg.get("timing", {}).get("row_start_timeout", 5),
+                f"CSV {row.line}行目を入力する前に、会計伝票の入力できる状態に戻っていません。"
+                f"前の仕訳の入力がずれた可能性があります。財務エントリの画面を確かめて直し、"
+                f"カーソルを新しい行の最初の欄に置いてから {ctl.resume_label} を押してください")
             progress.save(rows, i, row.line)
             self.perform(build_actions(self.cfg["steps"], row.values), f"CSV {row.line}行目")
             progress.save(rows, i + 1, None)

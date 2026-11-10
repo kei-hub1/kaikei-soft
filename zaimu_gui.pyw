@@ -488,7 +488,9 @@ class App:
         else:
             lines += ["", f"財務エントリで、入力先の関与先の「会計伝票」（月次入力・{first_ym[1]}月分）を開いていますか？", "",
                       "「はい」を押したら：", "1. 財務エントリの画面をクリック",
-                      f"2. カーソルを新しい行の「{first_field}」の欄に置く", "3. PgUp を押すと入力が始まります"]
+                      f"2. カーソルを新しい行の「{first_field}」の欄に置く"
+                      + ("（「課税区分一覧」が開いたままで構いません）" if g["tax"] == "課税" else ""),
+                      "3. PgUp を押すと入力が始まります"]
         if not messagebox.askyesno("メモ帳で練習" if practice else "入力開始", "\n".join(lines), parent=self.root):
             return
 

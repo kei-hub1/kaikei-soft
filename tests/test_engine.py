@@ -27,7 +27,8 @@ def write_csv(folder: Path, lines: list[str], name: str = "通帳.csv") -> Path:
 def load(path: Path, tax: str = "課税"):
     """（設定, 月ごとの仕訳）。待ち時間は0にする。"""
     cfg = z.load_config(z.DEFAULT_CONFIG)
-    cfg["timing"] = {"key_interval": 0, "paste_wait": 0, "row_wait": 0, "resume_wait": 0, "switch_timeout": 0.3}
+    cfg["timing"] = {"key_interval": 0, "paste_wait": 0, "row_wait": 0, "resume_wait": 0,
+                     "switch_timeout": 0.3, "row_start_timeout": 0.3}
     for step in cfg["steps"] + cfg["month_switch"]:
         step.wait = 0
     header, rows, errors = z.load_rows(path, cfg, {"消費税": tax})
@@ -176,6 +177,56 @@ class MonthSwitchTest(unittest.TestCase):
         press_resume_later(ctl, delay=0.6)
         runner.switch_month((2026, 1), (2026, 2), "税区分")
         self.assertTrue(any("確かめられませんでした" in m for m in messages), messages)
+
+
+class EntryWindowTest(unittest.TestCase):
+    """仕訳の入力を始めてよい画面かどうかの確認。"""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.cfg, groups = load(write_csv(self.dir, ["2026/01/05,9411,1113,100,0,,A,振込,",
+                                                     "2026/01/06,9411,1113,200,0,,B,振込,"]))
+        self.rows = groups[(2026, 1)]
+
+    def run_rows(self, runner):
+        runner.run_rows(self.rows, 0, z.Progress(self.dir / "p.json", "2026-01"), notify=lambda m: None,
+                        log_file=self.dir / "log.txt")
+
+    def test_tax_list_window_counts_as_entry_screen(self):
+        """課税の関与先では、会計伝票に入るとすぐ「課税区分一覧」が前に出る。そこから始められる。"""
+        runner, ctl, sender, messages = make_runner(self.cfg, FakeWin("課税区分一覧"))
+        ctl.paused = True
+        press_resume_later(ctl)
+        self.run_rows(runner)
+        self.assertIn("[B]", sender.text())
+        self.assertFalse([m for m in messages if m.startswith("■")], messages)
+
+    def test_other_window_at_start_is_refused(self):
+        runner, ctl, sender, messages = make_runner(self.cfg, FakeWin("メモ帳"))
+        ctl.paused = True
+        press_resume_later(ctl)
+        press_resume_later(ctl, delay=0.6, before=ctl.cancel)
+        with self.assertRaises(z.Cancelled):
+            self.run_rows(runner)
+        self.assertEqual(sender.text(), "")
+        self.assertIn("入力先ではありません", messages[0])
+
+    def test_leftover_popup_stops_before_next_row(self):
+        """前の仕訳がずれて一覧が残っていたら、次の仕訳を打つ前に止まる。"""
+        win = FakeWin()
+        runner, ctl, sender, messages = make_runner(self.cfg, win)
+        original_paste = sender.paste
+
+        def paste(text):
+            original_paste(text)
+            if text == "振込" and "[B]" not in sender.text():
+                win.fg = (3, "元帳摘要一覧", 100)   # 1件目の最後で、一覧が閉じなかったことにする
+        sender.paste = paste
+        press_resume_later(ctl, delay=0.8, before=ctl.cancel)
+        with self.assertRaises(z.Cancelled):
+            self.run_rows(runner)
+        self.assertNotIn("[B]", sender.text())
+        self.assertTrue(any("ずれた可能性" in m for m in messages), messages)
 
 
 class ProgressTest(unittest.TestCase):
