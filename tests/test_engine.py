@@ -128,6 +128,28 @@ class KeyOrderTest(unittest.TestCase):
         self.assertEqual(rows[0].values["貸方補助コード"], "2")
         self.assertEqual(rows[0].values.get("借方補助コード", ""), "")
 
+    def test_sub_code_on_other_account_is_typed_after_account(self):
+        """雑費・租税公課など、普通預金以外の科目の補助コードは CSV から入れる。"""
+        path = self.dir / "補助.csv"
+        path.write_text("日付,借方科目コード,借方補助コード,貸方科目コード,金額,取引先名,摘要\n"
+                        "2026/01/05,6229,3,1113,7000,固定資産税,税金\n", encoding="utf-8")
+        cfg, groups = load(path, "免税")
+        z.apply_sub_code(groups[(2026, 1)], "1113", "2")   # 画面で入れた普通預金の補助コード
+        runner, _, sender, _ = make_runner(cfg)
+        runner.run_rows(groups[(2026, 1)], 0, z.Progress(self.dir / "p.json", "2026-01"),
+                        notify=lambda m: None, log_file=self.dir / "log.txt")
+        self.assertTrue(sender.text().startswith("6229{ENTER}3{ENTER}1113{ENTER}2{ENTER}5{ENTER}7000"), sender.text())
+
+    def test_same_account_with_and_without_sub_code_is_an_error(self):
+        path = self.dir / "補助.csv"
+        path.write_text("日付,借方科目コード,借方補助コード,貸方科目コード,金額,取引先名,摘要\n"
+                        "2026/01/05,6229,3,1113,7000,固定資産税,税金\n"
+                        "2026/01/06,6229,,1113,8000,自動車税,税金\n", encoding="utf-8")
+        cfg = z.load_config(z.DEFAULT_CONFIG)
+        header, rows, _ = z.load_rows(path, cfg, {"消費税": "免税"})
+        z.apply_tax(rows, cfg)
+        self.assertTrue(any("6229" in e and "混ざって" in e for e in z.validate(rows, header, cfg)[0]))
+
     def test_memo_with_line_break_does_not_shift_rows(self):
         path = write_csv(self.dir, ['2026/01/05,9411,1113,500,0,,店,振込,"1行目\n2行目"', "2026/01/06,9411,1113,700,0,,店,振込,"])
         _, rows, errors = z.load_rows(path, z.load_config(z.DEFAULT_CONFIG))
