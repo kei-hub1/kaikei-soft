@@ -33,14 +33,13 @@ SPEEDS = {"ゆっくり（確認用）": 3.0, "標準": 1.0, "速い": 0.5, "と
 SLOW = "ゆっくり（確認用）"   # この速さのときだけ詳細ログを残す（記録の分だけ遅くなるため）
 
 
-def progress_path(csv_path: Path, ym: tuple[int, int], practice: bool) -> Path:
+def progress_path(csv_path: Path, ym: tuple[int, int]) -> Path:
     """CSV の場所と月ごとの記録ファイル。同じ名前の CSV が別のフォルダーにあっても混ざらない。"""
     key = hashlib.sha1(str(csv_path.resolve()).encode("utf-8")).hexdigest()[:8]
-    suffix = "_練習" if practice else ""
-    return RECORD_DIR / f"{csv_path.stem}_{key}_{ym[0]}-{ym[1]:02d}{suffix}.json"
+    return RECORD_DIR / f"{csv_path.stem}_{key}_{ym[0]}-{ym[1]:02d}.json"
 
 
-def find_progress(csv_path: Path, ym: tuple[int, int], practice: bool, rows: list[z.Row]) -> z.Progress:
+def find_progress(csv_path: Path, ym: tuple[int, int], rows: list[z.Row]) -> z.Progress:
     """その CSV・その月の記録を開く。
 
     CSV を別のフォルダーへ移したり名前を変えたりすると、記録ファイルの名前が合わなくなる。
@@ -48,10 +47,9 @@ def find_progress(csv_path: Path, ym: tuple[int, int], practice: bool, rows: lis
     ほかにあれば、それを引き継ぐ。
     """
     month_label = f"{ym[0]}-{ym[1]:02d}"
-    path = progress_path(csv_path, ym, practice)
+    path = progress_path(csv_path, ym)
     if not path.exists() and RECORD_DIR.exists():
-        suffix = "_練習" if practice else ""
-        for other in sorted(RECORD_DIR.glob(f"*_{month_label}{suffix}.json")):
+        for other in sorted(RECORD_DIR.glob(f"*_{month_label}.json")):
             try:
                 if z.Progress(other, month_label).matches(rows):
                     other.rename(path)
@@ -153,11 +151,10 @@ class App:
         btns = ttk.Frame(top)
         btns.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         self.check_btn = ttk.Button(btns, text="確認", command=self.on_check)
-        self.practice_btn = ttk.Button(btns, text="メモ帳で練習", command=lambda: self.start(True))
-        self.start_btn = ttk.Button(btns, text="入力開始", command=lambda: self.start(False))
+        self.start_btn = ttk.Button(btns, text="入力開始", command=self.start)
         self.cancel_btn = ttk.Button(btns, text="中止", command=self.cancel, state="disabled")
         self.reset_btn = ttk.Button(btns, text="この月の記録を消す", command=self.reset_progress)
-        for b in (self.check_btn, self.practice_btn, self.start_btn, self.cancel_btn):
+        for b in (self.check_btn, self.start_btn, self.cancel_btn):
             b.pack(side="left", padx=4)
         self.reset_btn.pack(side="right", padx=4)
         ttk.Button(btns, text="記録フォルダー", command=self.open_records).pack(side="right", padx=4)
@@ -207,7 +204,7 @@ class App:
             side="left", padx=(12, 0))
         self.root.attributes("-topmost", True)
 
-        self.inputs = [self.pick_btn, self.check_btn, self.practice_btn, self.start_btn,
+        self.inputs = [self.pick_btn, self.check_btn, self.start_btn,
                        self.reset_btn, self.sub_entry, self.speed_box, self.continue_chk, self.each_chk, self.hide_chk,
                        *self.tax_radios]
 
@@ -323,7 +320,7 @@ class App:
             self.month_tree.selection_set(next(iter(self.months)))
 
     def month_state(self, ym, rows: list[z.Row]) -> str:
-        prog = find_progress(self.csv, ym, False, rows)
+        prog = find_progress(self.csv, ym, rows)
         if not prog.data:
             return "未入力"
         done, problem = prog.resolve(rows)
@@ -430,7 +427,7 @@ class App:
         return [f"{a[1]}月分のあとは{b[1]}月分で、月が続いていないため、一時停止します（手で切り替えて PgUp）"
                 for a, b in zip(yms, yms[1:]) if not z.is_next_month(a, b)]
 
-    def start(self, practice: bool):
+    def start(self):
         if self.running:
             return
         if sys.platform != "win32":
@@ -446,7 +443,7 @@ class App:
         plan, problems = [], []   # plan は、まだ入力していない仕訳がある月だけ
         for m in g["months"]:
             ym = m["ym"]
-            progress = find_progress(path, ym, practice, m["rows"])
+            progress = find_progress(path, ym, m["rows"])
             done, problem = progress.resolve(m["rows"])
             if problem:
                 problems.append(f"{ym_label(ym)}: {problem}")
@@ -482,31 +479,26 @@ class App:
                       "入力途中の行が残っていれば、先に手で消してください。"]
         if g["warnings"]:
             lines += ["", f"※ 注意が{len(g['warnings'])}件あります（下の欄を見てください）。"]
-        if practice:
-            lines += ["", "メモ帳を開いておいてください。", "",
-                      "「はい」を押したら：", "1. メモ帳をクリック", "2. PgUp を押すと入力が始まります"]
-        else:
-            lines += ["", f"財務エントリで、入力先の関与先の「会計伝票」（月次入力・{first_ym[1]}月分）を開いていますか？", "",
-                      "「はい」を押したら：", "1. 財務エントリの画面をクリック",
-                      f"2. カーソルを新しい行の「{first_field}」の欄に置く"
-                      + ("（「課税区分一覧」が開いたままで構いません）" if g["tax"] == "課税" else ""),
-                      "3. PgUp を押すと入力が始まります"]
-        if not messagebox.askyesno("メモ帳で練習" if practice else "入力開始", "\n".join(lines), parent=self.root):
+        lines += ["", f"財務エントリで、入力先の関与先の「会計伝票」（月次入力・{first_ym[1]}月分）を開いていますか？", "",
+                  "「はい」を押したら：", "1. 財務エントリの画面をクリック",
+                  f"2. カーソルを新しい行の「{first_field}」の欄に置く"
+                  + ("（「課税区分一覧」が開いたままで構いません）" if g["tax"] == "課税" else ""),
+                  "3. PgUp を押すと入力が始まります"]
+        if not messagebox.askyesno("入力開始", "\n".join(lines), parent=self.root):
             return
 
-        target = g["cfg"].get("target", {}).get("notepad" if practice else "zaimu")
+        target = g["cfg"].get("target", {}).get("zaimu")
         self.write("")
-        self.status_var.set(f"{'メモ帳' if practice else '財務エントリ'}をクリックしてから PgUp を押してください")
+        self.status_var.set("財務エントリをクリックしてから PgUp を押してください")
         self.set_running(True)
         options = dict(speed=SPEEDS[self.speed_var.get()], stop_each_row=self.each_var.get(),
                        trace_file=TRACE_FILE if self.speed_var.get() == SLOW else None)
         if self.hide_var.get():
             self.root.iconify()  # 入力中は画面をしまう（止まったとき・終わったときに出てくる）
         threading.Thread(target=self.worker, daemon=True,
-                         args=(g["cfg"], target, plan, practice, path, first_field, options)).start()
+                         args=(g["cfg"], target, plan, path, first_field, options)).start()
 
-    def worker(self, cfg, target, plan, practice, path, first_field, options):
-        kind = "練習" if practice else "本番"
+    def worker(self, cfg, target, plan, path, first_field, options):
         current, sender = plan[0], None
         try:
             win = z.Win()
@@ -523,7 +515,7 @@ class App:
                         self.queue.put(("status", f"{ym[1]}月分に切り替え中…"))
                         runner.switch_month(plan[i - 1]["ym"], ym, first_field)
                     first_line = rows[current["start"]].line
-                    header = f"開始（{kind}）  {path}  {progress.month_label}  CSV {first_line}行目から"
+                    header = f"開始  {path}  {progress.month_label}  CSV {first_line}行目から"
                     self.post(f"\n── {ym_label(ym)}（{current['todo']}件）")
                     z.write_log(header, LOG_FILE)
                     if options["trace_file"]:
@@ -533,7 +525,7 @@ class App:
                                     on_row_done=lambda n, t, label=label: self.queue.put(
                                         ("status", f"{label} 入力中… {n}/{t}件 完了")),
                                     stop_each_row=options["stop_each_row"])
-                    z.write_log(f"終了（{kind}）  {progress.month_label}  {current['todo']}件", LOG_FILE)
+                    z.write_log(f"終了  {progress.month_label}  {current['todo']}件", LOG_FILE)
             finally:
                 self.ctl.uninstall()
             total = sum(m["todo"] for m in plan)
@@ -546,7 +538,7 @@ class App:
                 msg += f"\n※ CSV {progress.in_progress}行目は入力途中です。財務エントリの画面で確認し、残っていれば消してください。"
             self.post("\n" + msg)
             self.queue.put(("status", "中止しました"))
-            z.write_log(f"中止（{kind}）  {progress.month_label}  {progress.last_completed}行目まで完了", LOG_FILE)
+            z.write_log(f"中止  {progress.month_label}  {progress.last_completed}行目まで完了", LOG_FILE)
         except Exception:
             self.post("\nエラーで止まりました:\n" + traceback.format_exc())
             self.queue.put(("status", "エラーで止まりました"))
@@ -573,8 +565,8 @@ class App:
         if not (self.csv and ym):
             messagebox.showwarning("記録を消す", "CSV と月を選んでください。", parent=self.root)
             return
-        paths = [progress_path(self.csv, ym, practice=p) for p in (False, True)]
-        if not any(p.exists() for p in paths):
+        path = progress_path(self.csv, ym)
+        if not path.exists():
             messagebox.showinfo("記録を消す", "この月の記録はありません。", parent=self.root)
             return
         if not messagebox.askyesno("記録を消す",
@@ -582,8 +574,7 @@ class App:
                                    "次に入力すると、この月の最初の仕訳から入力します。よろしいですか？",
                                    parent=self.root):
             return
-        for p in paths:
-            p.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
         z.write_log(f"記録を消去  {self.csv}  {ym[0]}-{ym[1]:02d}", LOG_FILE)
         self.refresh_months()
         self.write(f"{ym_label(ym)}の記録を消しました。")
