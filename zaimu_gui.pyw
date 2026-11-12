@@ -96,8 +96,8 @@ class App:
         self.months: dict[str, tuple[int, int]] = {}
 
         root.title("財務エントリ 自動入力")
-        root.geometry("800x660")
-        root.minsize(600, 480)
+        root.geometry("680x520")
+        root.minsize(600, 440)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.load_cfg()  # 設定ファイルの誤りは起動時に知らせる
@@ -139,13 +139,13 @@ class App:
         self.sub_var = tk.StringVar()
         self.sub_entry = ttk.Entry(subf, textvariable=self.sub_var, width=8)
         self.sub_entry.pack(side="left")
-        ttk.Label(subf, text="普通預金（1113）の補助コード。財務エントリで確かめて入れる。補助科目がない関与先は空欄").pack(
+        ttk.Label(subf, text="普通預金（1113）の補助コード（補助科目がなければ空欄）").pack(
             side="left", padx=(8, 0))
 
         ttk.Label(top, text="月").grid(row=3, column=0, sticky="nw", **pad)
         self.month_tree = ttk.Treeview(top, columns=("month", "count", "state"), show="headings",
-                                       height=6, selectmode="browse")
-        for col, text, width in (("month", "月", 110), ("count", "件数", 60), ("state", "状態", 300)):
+                                       height=4, selectmode="browse")
+        for col, text, width in (("month", "月", 100), ("count", "件数", 50), ("state", "状態", 260)):
             self.month_tree.heading(col, text=text)
             self.month_tree.column(col, width=width, anchor="e" if col == "count" else "w")
         self.month_tree.grid(row=3, column=1, columnspan=2, sticky="nsew", **pad)
@@ -171,7 +171,7 @@ class App:
         logf = ttk.Frame(top)
         logf.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
         top.rowconfigure(7, weight=1)
-        self.log = tk.Text(logf, height=12, wrap="char", state="disabled")
+        self.log = tk.Text(logf, height=8, wrap="char", state="disabled")
         sb = ttk.Scrollbar(logf, command=self.log.yview)
         self.log.configure(yscrollcommand=sb.set)
         self.log.pack(side="left", fill="both", expand=True)
