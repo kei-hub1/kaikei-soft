@@ -124,8 +124,8 @@ static std::wstring g_saveFolder;
 // キャプチャモード
 static HWND  g_overlay = nullptr;
 static Dib   g_screen;        // 起動時に撮った仮想スクリーン全体
-static Dib   g_dark;          // それを暗くしたもの
 static POINT g_virtOrigin = {};
+static int   g_selBorder = 4; // 選択範囲の枠線の太さ（表示ウィンドウの枠線と同じ）
 static bool  g_dragging = false;
 static POINT g_dragStart = {};
 static POINT g_dragCur = {};
@@ -135,7 +135,7 @@ static bool  g_overlayDone = false;  // true: キャプチャ成功で閉じる�
 static HWND         g_viewer = nullptr;
 static Dib          g_image;  // キャプチャ画像
 static std::wstring g_baseName;  // 日時ファイル名（拡張子なし）
-static int          g_frame = 2;         // 画像の外側に付ける枠線の太さ（物理ピクセル）
+static int          g_frame = 4;         // 画像の外側に付ける枠線の太さ（物理ピクセル）
 static bool         g_moving = false;    // 左ドラッグで移動中
 static POINT        g_moveCursor0 = {};  // 移動開始時のカーソル位置（画面座標）
 static POINT        g_moveWindow0 = {};  // 移動開始時のウィンドウ位置
@@ -248,6 +248,11 @@ static UINT DpiForRect(const RECT& r) {
     int d = GetDeviceCaps(dc, LOGPIXELSX);
     ReleaseDC(nullptr, dc);
     return d > 0 ? static_cast<UINT>(d) : 96;
+}
+
+// 枠線の太さ（物理ピクセル）。拡大率 100% で 4 ピクセル、拡大率に合わせて太くする（150% なら 6）
+static int FrameThickness(UINT dpi) {
+    return std::max(4, MulDiv(4, static_cast<int>(dpi), 96));
 }
 
 static void EnableDpiAwareness() {
@@ -721,8 +726,7 @@ static LRESULT CALLBACK ViewerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 // imageRect: 画像を表示する画面上の位置（=キャプチャした位置）。枠線はその外側に付ける。
 static bool CreateViewer(const RECT& imageRect) {
-    // 枠線は拡大率 100% で 2 ピクセル。拡大率に合わせて太くする（150% なら 3 ピクセル）
-    g_frame = std::max(2, MulDiv(2, static_cast<int>(DpiForRect(imageRect)), 96));
+    g_frame = FrameThickness(DpiForRect(imageRect));
     RECT wr = imageRect;
     InflateRect(&wr, g_frame, g_frame);
     const int w = wr.right - wr.left;
@@ -742,7 +746,7 @@ static bool CreateViewer(const RECT& imageRect) {
 }
 
 // ---------------------------------------------------------------------------
-// キャプチャモード（全モニターを覆う暗いオーバーレイ）
+// キャプチャモード（全モニターを覆うオーバーレイ。起動時の画面をそのまま表示し、選択範囲に枠線を描く）
 // ---------------------------------------------------------------------------
 // 押した点と現在の点の両方のピクセルを含む矩形（画面の右端・下端の 1 ピクセルまで選べるように）
 static RECT SelectionRect() {
@@ -761,11 +765,9 @@ static POINT ClampToScreen(LPARAM lp) {
     return p;
 }
 
-static const int kBorder = 2;  // 枠線の太さ（選択範囲の外側に描く）
-
 static void InvalidateSelection(HWND hwnd, const RECT& sel) {
     RECT r = sel;
-    InflateRect(&r, kBorder + 1, kBorder + 1);
+    InflateRect(&r, g_selBorder + 1, g_selBorder + 1);
     InvalidateRect(hwnd, &r, FALSE);
 }
 
@@ -777,7 +779,7 @@ static void FinishCapture(HWND overlay, const RECT& sel) {
         DestroyWindow(overlay);
         return;
     }
-    // 起動時に撮った画面から切り出す（オーバーレイの暗さや枠線は含まれない）
+    // 起動時に撮った画面から切り出す（オーバーレイの枠線は含まれない）
     BitBlt(g_image.dc, 0, 0, w, h, g_screen.dc, sel.left, sel.top, SRCCOPY);
     GdiFlush();
     g_baseName = TimestampName();
@@ -792,7 +794,6 @@ static void FinishCapture(HWND overlay, const RECT& sel) {
     g_overlayDone = true;
     DestroyWindow(overlay);  // 表示ウィンドウを出してから消す（ちらつき防止）
     g_screen.Destroy();
-    g_dark.Destroy();
 
     AutoSave(g_viewer);
 }
@@ -821,19 +822,14 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HDC buf = CreateCompatibleDC(hdc);
             HBITMAP bb = CreateCompatibleBitmap(hdc, w, h);
             HGDIOBJ old = SelectObject(buf, bb);
-            BitBlt(buf, 0, 0, w, h, g_dark.dc, rc.left, rc.top, SRCCOPY);
+            // 画面は暗くせず、起動時に撮った画面をそのまま表示する
+            BitBlt(buf, 0, 0, w, h, g_screen.dc, rc.left, rc.top, SRCCOPY);
             if (g_dragging) {
-                const RECT sel = SelectionRect();
-                RECT is;
-                if (IntersectRect(&is, &sel, &rc)) {
-                    BitBlt(buf, is.left - rc.left, is.top - rc.top, is.right - is.left,
-                           is.bottom - is.top, g_screen.dc, is.left, is.top, SRCCOPY);
-                }
-                // 枠線
-                RECT o = sel;
-                InflateRect(&o, kBorder, kBorder);
+                // 選択範囲の外側に枠線（離すと、表示ウィンドウの枠線がちょうど同じ位置に出る）
+                RECT o = SelectionRect();
+                InflateRect(&o, g_selBorder, g_selBorder);
                 OffsetRect(&o, -rc.left, -rc.top);
-                FillFrame(buf, o, kBorder, kFrameColor);
+                FillFrame(buf, o, g_selBorder, kFrameColor);
             }
             BitBlt(hdc, rc.left, rc.top, w, h, buf, 0, 0, SRCCOPY);
             SelectObject(buf, old);
@@ -844,12 +840,17 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
-    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDOWN: {
         g_dragging = true;
         g_dragStart = g_dragCur = ClampToScreen(lp);
+        // 枠線の太さは、押した点があるモニターの拡大率に合わせる
+        RECT start = {g_dragStart.x + g_virtOrigin.x, g_dragStart.y + g_virtOrigin.y,
+                      g_dragStart.x + g_virtOrigin.x + 1, g_dragStart.y + g_virtOrigin.y + 1};
+        g_selBorder = FrameThickness(DpiForRect(start));
         SetCapture(hwnd);
         InvalidateSelection(hwnd, SelectionRect());
         return 0;
+    }
 
     case WM_MOUSEMOVE:
         if (g_dragging) {
@@ -917,7 +918,7 @@ static bool StartCaptureMode() {
     g_virtOrigin.y = vy;
 
     // 画面全体を先に撮っておく（以後この画像から切り出す）
-    if (!g_screen.Create(vw, vh) || !g_dark.Create(vw, vh)) {
+    if (!g_screen.Create(vw, vh)) {
         ShowError(nullptr, L"メモリが不足しているため、キャプチャモードを開始できませんでした。");
         return false;
     }
@@ -925,10 +926,6 @@ static bool StartCaptureMode() {
     BitBlt(g_screen.dc, 0, 0, vw, vh, screen, vx, vy, SRCCOPY | CAPTUREBLT);
     ReleaseDC(nullptr, screen);
     GdiFlush();
-
-    // 暗い画像（各色 1/2）
-    const size_t n = static_cast<size_t>(vw) * vh;
-    for (size_t i = 0; i < n; ++i) g_dark.bits[i] = (g_screen.bits[i] >> 1) & 0x007F7F7F;
 
     g_overlay = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kOverlayClass, kAppName,
                                 WS_POPUP, vx, vy, vw, vh, nullptr, nullptr, g_hInst, nullptr);
@@ -1012,7 +1009,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
     g_image.Destroy();
     g_screen.Destroy();
-    g_dark.Destroy();
     if (SUCCEEDED(hrCo)) CoUninitialize();
     return exitCode;
 }
