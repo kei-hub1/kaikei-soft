@@ -1,7 +1,7 @@
 // RangeCapture - 範囲指定キャプチャ & 最前面表示ソフト
 //
 //  起動するとすぐにキャプチャモードに入り、ドラッグした範囲をキャプチャして
-//  枠なし・最前面のウィンドウで同じ位置に表示する（左ドラッグで移動可）。
+//  タイトルバーなし・最前面のウィンドウで同じ位置に表示する（青い枠線と影付き、左ドラッグで移動可）。
 //  キャプチャ時に PNG で自動保存する。表示ウィンドウのメニューから次のキャプチャを始められる。
 //
 //  ・座標はすべて物理ピクセルで扱う（Per-Monitor DPI Aware V2）。
@@ -135,6 +135,7 @@ static bool  g_overlayDone = false;  // true: キャプチャ成功で閉じる�
 static HWND         g_viewer = nullptr;
 static Dib          g_image;  // キャプチャ画像
 static std::wstring g_baseName;  // 日時ファイル名（拡張子なし）
+static int          g_frame = 2;         // 画像の外側に付ける枠線の太さ（物理ピクセル）
 static bool         g_moving = false;    // 左ドラッグで移動中
 static POINT        g_moveCursor0 = {};  // 移動開始時のカーソル位置（画面座標）
 static POINT        g_moveWindow0 = {};  // 移動開始時のウィンドウ位置
@@ -212,9 +213,43 @@ static void DisableDwmEffects(HWND hwnd) {
     DwmSetWindowAttribute(hwnd, kDwmTransitionsForceDisabled, &disable, sizeof(disable));
 }
 
+static const COLORREF kFrameColor = RGB(0, 120, 215);  // 選択範囲・表示ウィンドウの枠線の色
+
+// outer の内側に太さ t の枠を塗る
+static void FillFrame(HDC dc, const RECT& outer, int t, COLORREF color) {
+    HBRUSH br = CreateSolidBrush(color);
+    RECT r;
+    SetRect(&r, outer.left, outer.top, outer.right, outer.top + t);
+    FillRect(dc, &r, br);
+    SetRect(&r, outer.left, outer.bottom - t, outer.right, outer.bottom);
+    FillRect(dc, &r, br);
+    SetRect(&r, outer.left, outer.top, outer.left + t, outer.bottom);
+    FillRect(dc, &r, br);
+    SetRect(&r, outer.right - t, outer.top, outer.right, outer.bottom);
+    FillRect(dc, &r, br);
+    DeleteObject(br);
+}
+
 // ---------------------------------------------------------------------------
 // DPI
 // ---------------------------------------------------------------------------
+// 矩形があるモニターの DPI（拡大率 100% = 96）
+static UINT DpiForRect(const RECT& r) {
+    HMONITOR mon = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+    using GetDpiForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+    static HMODULE shcore = LoadLibraryW(L"shcore.dll");
+    if (shcore) {
+        auto fn = reinterpret_cast<GetDpiForMonitorFn>(
+            reinterpret_cast<void*>(GetProcAddress(shcore, "GetDpiForMonitor")));
+        UINT dx = 0, dy = 0;
+        if (fn && SUCCEEDED(fn(mon, 0 /* MDT_EFFECTIVE_DPI */, &dx, &dy)) && dx) return dx;
+    }
+    HDC dc = GetDC(nullptr);
+    int d = GetDeviceCaps(dc, LOGPIXELSX);
+    ReleaseDC(nullptr, dc);
+    return d > 0 ? static_cast<UINT>(d) : 96;
+}
+
 static void EnableDpiAwareness() {
     // 通常はマニフェストで PerMonitorV2 が設定済み。念のため実行時にも設定する。
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
@@ -518,7 +553,7 @@ static void ChangeSaveFolder(HWND owner) {
 }
 
 // ---------------------------------------------------------------------------
-// 表示ウィンドウ（枠なし・最前面・キャプチャ位置に表示）
+// 表示ウィンドウ（タイトルバーなし・枠線と影付き・最前面・キャプチャ位置に表示）
 // ---------------------------------------------------------------------------
 // 新しいキャプチャを始める（自分の exe をもう一度起動する。今の表示ウィンドウはそのまま残る）
 static void LaunchNewCapture(HWND owner) {
@@ -573,7 +608,10 @@ static LRESULT CALLBACK ViewerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
-        BitBlt(hdc, 0, 0, g_image.w, g_image.h, g_image.dc, 0, 0, SRCCOPY);
+        BitBlt(hdc, g_frame, g_frame, g_image.w, g_image.h, g_image.dc, 0, 0, SRCCOPY);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillFrame(hdc, rc, g_frame, kFrameColor);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -681,17 +719,21 @@ static LRESULT CALLBACK ViewerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-static bool CreateViewer(const RECT& screenRect) {
+// imageRect: 画像を表示する画面上の位置（=キャプチャした位置）。枠線はその外側に付ける。
+static bool CreateViewer(const RECT& imageRect) {
+    // 枠線は拡大率 100% で 2 ピクセル。拡大率に合わせて太くする（150% なら 3 ピクセル）
+    g_frame = std::max(2, MulDiv(2, static_cast<int>(DpiForRect(imageRect)), 96));
+    RECT wr = imageRect;
+    InflateRect(&wr, g_frame, g_frame);
+    const int w = wr.right - wr.left;
+    const int h = wr.bottom - wr.top;
+
     std::wstring title = std::wstring(kAppName) + L" - " + g_baseName;
-    g_viewer = CreateWindowExW(WS_EX_TOPMOST, kViewerClass, title.c_str(), WS_POPUP,
-                               screenRect.left, screenRect.top, screenRect.right - screenRect.left,
-                               screenRect.bottom - screenRect.top, nullptr, nullptr, g_hInst,
-                               nullptr);
+    g_viewer = CreateWindowExW(WS_EX_TOPMOST, kViewerClass, title.c_str(), WS_POPUP, wr.left,
+                               wr.top, w, h, nullptr, nullptr, g_hInst, nullptr);
     if (!g_viewer) return false;
     // 念のため物理ピクセルでの位置・サイズを確定させてから表示する
-    SetWindowPos(g_viewer, HWND_TOPMOST, screenRect.left, screenRect.top,
-                 screenRect.right - screenRect.left, screenRect.bottom - screenRect.top,
-                 SWP_NOACTIVATE);
+    SetWindowPos(g_viewer, HWND_TOPMOST, wr.left, wr.top, w, h, SWP_NOACTIVATE);
     ShowWindow(g_viewer, SW_SHOW);
     UpdateWindow(g_viewer);
     SetForegroundWindow(g_viewer);
@@ -791,17 +833,7 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 RECT o = sel;
                 InflateRect(&o, kBorder, kBorder);
                 OffsetRect(&o, -rc.left, -rc.top);
-                HBRUSH br = CreateSolidBrush(RGB(0, 120, 215));
-                RECT t;
-                SetRect(&t, o.left, o.top, o.right, o.top + kBorder);
-                FillRect(buf, &t, br);
-                SetRect(&t, o.left, o.bottom - kBorder, o.right, o.bottom);
-                FillRect(buf, &t, br);
-                SetRect(&t, o.left, o.top, o.left + kBorder, o.bottom);
-                FillRect(buf, &t, br);
-                SetRect(&t, o.right - kBorder, o.top, o.right, o.bottom);
-                FillRect(buf, &t, br);
-                DeleteObject(br);
+                FillFrame(buf, o, kBorder, kFrameColor);
             }
             BitBlt(hdc, rc.left, rc.top, w, h, buf, 0, 0, SRCCOPY);
             SelectObject(buf, old);
@@ -961,6 +993,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     RegisterClassExW(&wc);
 
     wc.lpfnWndProc = ViewerProc;
+    wc.style = CS_DROPSHADOW;  // 表示ウィンドウに影を付ける（Windows の「ウィンドウの下に影を表示する」設定に従う）
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kViewerClass;
     RegisterClassExW(&wc);
