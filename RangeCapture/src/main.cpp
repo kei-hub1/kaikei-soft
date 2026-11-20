@@ -668,6 +668,10 @@ static LRESULT CALLBACK ViewerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_moving = false;
         return 0;
 
+    case WM_LBUTTONDBLCLK:  // ダブルクリックで閉じる
+        PostMessageW(hwnd, WM_COMMAND, IDM_CLOSE, 0);
+        return 0;
+
     case WM_TIMER:
         if (wp == kTimerNewCapture) {
             KillTimer(hwnd, kTimerNewCapture);
@@ -990,7 +994,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     RegisterClassExW(&wc);
 
     wc.lpfnWndProc = ViewerProc;
-    wc.style = CS_DROPSHADOW;  // 表示ウィンドウに影を付ける（Windows の「ウィンドウの下に影を表示する」設定に従う）
+    // 影を付ける（Windows の「ウィンドウの下に影を表示する」設定に従う）。ダブルクリックを受け取る
+    wc.style = CS_DROPSHADOW | CS_DBLCLKS;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kViewerClass;
     RegisterClassExW(&wc);
