@@ -1,7 +1,7 @@
 // RangeCapture - 範囲指定キャプチャ & 最前面表示ソフト
 //
 //  起動するとすぐにキャプチャモードに入り、ドラッグした範囲をキャプチャして
-//  タイトルバーなし・最前面のウィンドウで同じ位置に表示する（青い枠線と影付き、左ドラッグで移動可）。
+//  タイトルバーなし・最前面のウィンドウで同じ位置に表示する（紫の枠線と影付き、左ドラッグで移動可）。
 //  キャプチャ時に PNG で自動保存する。表示ウィンドウのメニューから次のキャプチャを始められる。
 //
 //  ・座標はすべて物理ピクセルで扱う（Per-Monitor DPI Aware V2）。
@@ -213,7 +213,7 @@ static void DisableDwmEffects(HWND hwnd) {
     DwmSetWindowAttribute(hwnd, kDwmTransitionsForceDisabled, &disable, sizeof(disable));
 }
 
-static const COLORREF kFrameColor = RGB(0, 120, 215);  // 選択範囲・表示ウィンドウの枠線の色
+static const COLORREF kFrameColor = RGB(177, 155, 217);  // 選択範囲・表示ウィンドウの枠線の色（紫 #B19BD9）
 
 // outer の内側に太さ t の枠を塗る
 static void FillFrame(HDC dc, const RECT& outer, int t, COLORREF color) {
