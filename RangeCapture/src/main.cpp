@@ -20,6 +20,7 @@
 
 #include <windows.h>
 #include <windowsx.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <wincodec.h>
@@ -410,6 +411,102 @@ static HRESULT SaveImageFile(const std::wstring& path, const Dib& img, ImageForm
     if (factory) factory->Release();
     if (FAILED(hr) && fileCreated) DeleteFileW(path.c_str());
     return hr;
+}
+
+// ---------------------------------------------------------------------------
+// 古いキャプチャの自動削除
+//   保存先フォルダ直下の「日時名.png」（自動保存したファイル）のうち、撮ってから
+//   kAutoDeleteDays 日を過ぎたものをごみ箱へ移す。ほかのファイル・サブフォルダには触らない。
+// ---------------------------------------------------------------------------
+static const int kAutoDeleteDays = 7;
+
+// 自動保存のファイル名（YYYYMMDD_HHMMSS_mmm.png / YYYYMMDD_HHMMSS_mmm_N.png）なら撮った日時を返す
+static bool ParseCaptureFileTime(const std::wstring& name, ULONGLONG* time) {
+    const size_t n = name.size();
+    if (n < 23 || ToLower(name.substr(n - 4)) != L".png") return false;
+    const std::wstring base = name.substr(0, n - 4);
+    auto digits = [&](size_t from, size_t count) {
+        for (size_t i = from; i < from + count; ++i)
+            if (i >= base.size() || base[i] < L'0' || base[i] > L'9') return false;
+        return true;
+    };
+    if (!digits(0, 8) || base[8] != L'_' || !digits(9, 6) || base[15] != L'_' || !digits(16, 3))
+        return false;
+    if (base.size() > 19) {  // 重複回避の「_2」などの連番
+        if (base[19] != L'_' || base.size() == 20 || !digits(20, base.size() - 20)) return false;
+    }
+    auto num = [&](size_t from, size_t count) {
+        return static_cast<WORD>(std::stoi(base.substr(from, count)));
+    };
+    SYSTEMTIME st = {};
+    st.wYear = num(0, 4);
+    st.wMonth = num(4, 2);
+    st.wDay = num(6, 2);
+    st.wHour = num(9, 2);
+    st.wMinute = num(11, 2);
+    st.wSecond = num(13, 2);
+    st.wMilliseconds = num(16, 3);
+    FILETIME ft;
+    if (!SystemTimeToFileTime(&st, &ft)) return false;  // ありえない日付は対象外
+    *time = (static_cast<ULONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    return true;
+}
+
+static void DeleteOldCaptures(const std::wstring& folder) {
+    if (!DirectoryExists(folder)) return;
+    // ごみ箱が使えない場所（ネットワークドライブなど）では、完全に削除されてしまうので何もしない
+    SHQUERYRBINFO rb = {};
+    rb.cbSize = sizeof(rb);
+    std::wstring root = JoinPath(folder, L"");
+    if (FAILED(SHQueryRecycleBinW(root.c_str(), &rb))) return;
+
+    // ファイル名の日時はローカル時刻なので、現在のローカル時刻と比べる
+    SYSTEMTIME nowSt;
+    GetLocalTime(&nowSt);
+    FILETIME nowFt;
+    SystemTimeToFileTime(&nowSt, &nowFt);
+    const ULONGLONG now = (static_cast<ULONGLONG>(nowFt.dwHighDateTime) << 32) | nowFt.dwLowDateTime;
+    const ULONGLONG limit = static_cast<ULONGLONG>(kAutoDeleteDays) * 24 * 60 * 60 * 10000000ULL;
+
+    std::vector<wchar_t> from;  // SHFileOperation 用: 「パス\0パス\0...\0\0」
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(JoinPath(folder, L"*.png").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        ULONGLONG taken = 0;
+        if (!ParseCaptureFileTime(fd.cFileName, &taken)) continue;
+        if (taken > now || now - taken <= limit) continue;
+        std::wstring path = JoinPath(folder, fd.cFileName);
+        from.insert(from.end(), path.begin(), path.end());
+        from.push_back(L'\0');
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (from.empty()) return;
+    from.push_back(L'\0');
+
+    SHFILEOPSTRUCTW op = {};
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.data();
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    SHFileOperationW(&op);
+}
+
+static DWORD WINAPI DeleteOldCapturesThread(LPVOID param) {
+    std::wstring* folder = static_cast<std::wstring*>(param);
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    DeleteOldCaptures(*folder);
+    if (SUCCEEDED(hr)) CoUninitialize();
+    delete folder;
+    return 0;
+}
+
+// キャプチャの邪魔をしないよう、別スレッドで削除する
+static HANDLE StartDeleteOldCaptures() {
+    auto* folder = new std::wstring(g_saveFolder);
+    HANDLE h = CreateThread(nullptr, 0, DeleteOldCapturesThread, folder, 0, nullptr);
+    if (!h) delete folder;
+    return h;
 }
 
 // 自動保存（保存先フォルダに 日時.png）
@@ -1005,7 +1102,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     RegisterClassExW(&wc);
 
     int exitCode = 0;
+    HANDLE cleanup = nullptr;
     if (StartCaptureMode()) {
+        // 画面を撮り終えてから、古いキャプチャの削除を裏で始める
+        cleanup = StartDeleteOldCaptures();
         MSG msg;
         while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
             TranslateMessage(&msg);
@@ -1014,6 +1114,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         exitCode = static_cast<int>(msg.wParam);
     } else {
         exitCode = 1;
+    }
+    if (cleanup) {
+        // 削除の途中で終了しないよう待つ（ウィンドウはもう閉じているので見た目には影響しない）
+        WaitForSingleObject(cleanup, 30000);
+        CloseHandle(cleanup);
     }
 
     g_image.Destroy();
