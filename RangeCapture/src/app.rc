@@ -3,6 +3,9 @@
 // RT_MANIFEST (24), ID 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID
 1 24 "app.manifest"
 
+// アプリのアイコン（エクスプローラー・タスクバーに表示される）。tools/make_icon.py で作成
+1 ICON "app.ico"
+
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     1,0,0,0
 PRODUCTVERSION  1,0,0,0

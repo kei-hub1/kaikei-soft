@@ -985,8 +985,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
     wc.hInstance = hInst;
-    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(1));
-    wc.hIconSm = wc.hIcon;
+    wc.hIcon = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                             GetSystemMetrics(SM_CXICON),
+                                             GetSystemMetrics(SM_CYICON), 0));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                               GetSystemMetrics(SM_CXSMICON),
+                                               GetSystemMetrics(SM_CYSMICON), 0));
 
     wc.lpfnWndProc = OverlayProc;
     wc.hCursor = LoadCursorW(nullptr, IDC_CROSS);
