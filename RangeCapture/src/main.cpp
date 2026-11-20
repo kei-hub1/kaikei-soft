@@ -1,7 +1,8 @@
 // RangeCapture - 範囲指定キャプチャ & 最前面表示ソフト
 //
 //  起動するとすぐにキャプチャモードに入り、ドラッグした範囲をキャプチャして
-//  枠なし・最前面のウィンドウで同じ位置に表示する。キャプチャ時に PNG で自動保存する。
+//  枠なし・最前面のウィンドウで同じ位置に表示する（左ドラッグで移動可）。
+//  キャプチャ時に PNG で自動保存する。表示ウィンドウのメニューから次のキャプチャを始められる。
 //
 //  ・座標はすべて物理ピクセルで扱う（Per-Monitor DPI Aware V2）。
 //    画面の拡大縮小 (125%, 150% ...) や DPI の異なる複数モニターでも、
@@ -41,6 +42,7 @@ static const wchar_t kIniSection[]     = L"Settings";
 static const wchar_t kIniKeyFolder[]   = L"SaveFolder";
 
 enum MenuId : UINT {
+    IDM_NEW_CAPTURE = 1000,
     IDM_COPY = 1001,
     IDM_SAVEAS,
     IDM_CHANGE_FOLDER,
@@ -133,6 +135,12 @@ static bool  g_overlayDone = false;  // true: キャプチャ成功で閉じる�
 static HWND         g_viewer = nullptr;
 static Dib          g_image;  // キャプチャ画像
 static std::wstring g_baseName;  // 日時ファイル名（拡張子なし）
+static bool         g_moving = false;    // 左ドラッグで移動中
+static POINT        g_moveCursor0 = {};  // 移動開始時のカーソル位置（画面座標）
+static POINT        g_moveWindow0 = {};  // 移動開始時のウィンドウ位置
+
+static const UINT_PTR kTimerNewCapture = 1;
+static const LPARAM   kFromKeyboard = 1;  // WM_COMMAND の lParam: キー操作から
 
 // ---------------------------------------------------------------------------
 // ユーティリティ
@@ -431,6 +439,7 @@ static bool CopyToClipboard(HWND owner, const Dib& img) {
 // 名前を付けて保存
 // ---------------------------------------------------------------------------
 static void SaveAs(HWND owner) {
+    LoadSettings();  // 別に起動した exe で保存先が変更されている場合に備えて読み直す
     IFileSaveDialog* dlg = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_PPV_ARGS(&dlg))))
@@ -500,6 +509,7 @@ static void SaveAs(HWND owner) {
 }
 
 static void ChangeSaveFolder(HWND owner) {
+    LoadSettings();
     std::wstring folder;
     if (!PickFolder(owner, g_saveFolder, folder)) return;
     g_saveFolder = folder;
@@ -510,8 +520,35 @@ static void ChangeSaveFolder(HWND owner) {
 // ---------------------------------------------------------------------------
 // 表示ウィンドウ（枠なし・最前面・キャプチャ位置に表示）
 // ---------------------------------------------------------------------------
+// 新しいキャプチャを始める（自分の exe をもう一度起動する。今の表示ウィンドウはそのまま残る）
+static void LaunchNewCapture(HWND owner) {
+    std::vector<wchar_t> exe(32768);
+    DWORD len = GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size()));
+    if (len == 0 || len >= exe.size()) {
+        ShowError(owner, L"新しいキャプチャを開始できませんでした。");
+        return;
+    }
+    std::wstring cmd = L"\"" + std::wstring(exe.data()) + L"\"";
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    AllowSetForegroundWindow(ASFW_ANY);  // 新しいキャプチャ画面が前面に出られるように
+    if (!CreateProcessW(exe.data(), cmdBuf.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                        &si, &pi)) {
+        ShowError(owner, L"新しいキャプチャを開始できませんでした。\n\n" +
+                             HResultText(HRESULT_FROM_WIN32(GetLastError())));
+        return;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+}
+
 static void ShowViewerMenu(HWND hwnd, int x, int y) {
     HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, IDM_NEW_CAPTURE, L"新しくキャプチャ(&N)\tN");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_COPY, L"コピー(&C)\tCtrl+C");
     AppendMenuW(menu, MF_STRING, IDM_SAVEAS, L"名前を付けて保存(&S)...\tCtrl+S");
     AppendMenuW(menu, MF_STRING, IDM_CHANGE_FOLDER, L"保存先フォルダの変更(&F)...");
@@ -554,10 +591,53 @@ static LRESULT CALLBACK ViewerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    // 左ドラッグでウィンドウを移動する（物理ピクセルの画面座標で計算するので、
+    // 拡大率の違うモニターへ移しても画像は等倍のまま）
+    case WM_LBUTTONDOWN: {
+        RECT rc;
+        GetWindowRect(hwnd, &rc);
+        GetCursorPos(&g_moveCursor0);
+        g_moveWindow0.x = rc.left;
+        g_moveWindow0.y = rc.top;
+        g_moving = true;
+        SetCapture(hwnd);
+        return 0;
+    }
+
+    case WM_MOUSEMOVE:
+        if (g_moving) {
+            POINT p;
+            GetCursorPos(&p);
+            SetWindowPos(hwnd, nullptr, g_moveWindow0.x + (p.x - g_moveCursor0.x),
+                         g_moveWindow0.y + (p.y - g_moveCursor0.y), 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return 0;
+
+    case WM_LBUTTONUP:
+        if (g_moving) {
+            g_moving = false;
+            ReleaseCapture();
+        }
+        return 0;
+
+    case WM_CAPTURECHANGED:
+        g_moving = false;
+        return 0;
+
+    case WM_TIMER:
+        if (wp == kTimerNewCapture) {
+            KillTimer(hwnd, kTimerNewCapture);
+            LaunchNewCapture(hwnd);
+        }
+        return 0;
+
     case WM_KEYDOWN: {
         bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         if (wp == VK_ESCAPE) {
             PostMessageW(hwnd, WM_COMMAND, IDM_CLOSE, 0);
+        } else if (wp == 'N') {
+            PostMessageW(hwnd, WM_COMMAND, IDM_NEW_CAPTURE, kFromKeyboard);
         } else if (ctrl && wp == 'C') {
             PostMessageW(hwnd, WM_COMMAND, IDM_COPY, 0);
         } else if (ctrl && wp == 'S') {
@@ -568,6 +648,11 @@ static LRESULT CALLBACK ViewerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_COMMAND:
         switch (LOWORD(wp)) {
+        case IDM_NEW_CAPTURE:
+            // メニューから選んだときは、メニューが消えきってから起動する
+            // （新しいキャプチャが最初に撮る画面に、消えかけのメニューが写らないように）
+            SetTimer(hwnd, kTimerNewCapture, lp == kFromKeyboard ? 10 : 300, nullptr);
+            return 0;
         case IDM_COPY:
             if (!CopyToClipboard(hwnd, g_image))
                 ShowError(hwnd, L"クリップボードへのコピーに失敗しました。");
